@@ -8,6 +8,7 @@ owns accounts, characters and the login/link/create decision, so there are no
 DB-backed endpoints to test here.
 """
 
+import html
 import json
 import os
 import threading
@@ -15,7 +16,7 @@ import unittest
 import unittest.mock
 import urllib.error
 import urllib.request
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from mudauth import providers, server
 from mudauth.providers import ProviderConfig, ProviderUser
@@ -124,6 +125,21 @@ class HandlerTest(unittest.TestCase):
             self.fail("expected HTTPError")
         except urllib.error.HTTPError as e:
             self.assertEqual(e.code, 404)
+
+    def test_unknown_provider_response_escapes_html(self):
+        # provider is attacker-controlled (it comes straight from the URL) and
+        # the 404 body is served as text/html, so a raw reflection here is
+        # reflected XSS on the operator's public origin.
+        payload = "<script>alert(1)</script>"
+        nonce = "1d1d1d1d-1111-1111-1111-111111111111"
+        try:
+            self._get(f"/auth/login?provider={quote(payload)}&login_nonce={nonce}")
+            self.fail("expected HTTPError 404")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 404)
+            body = e.read().decode()
+            self.assertNotIn(payload, body)
+            self.assertIn(html.escape(payload), body)
 
     def test_full_login_flow_then_poll(self):
         nonce = "22222222-2222-2222-2222-222222222222"

@@ -259,7 +259,7 @@ class AuthHandler(BaseHTTPRequestHandler):
     def _login(self, q: dict) -> None:
         provider = (q.get("provider", [""])[0]) or ""
         if provider not in self.configs:
-            self._html(404, f"Provider '{provider}' is not configured.")
+            self._html(404, f"Provider '{html.escape(provider)}' is not configured.")
             return
         nonce = q.get("login_nonce", [""])[0]
         if nonce and not _is_uuid(nonce):
