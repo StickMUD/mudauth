@@ -1,0 +1,9 @@
+# The wheel carries only the package. The sdist additionally carries the
+# files an operator or a distro packager needs: the environment template the
+# README and deploy guide tell people to copy, the reverse-proxy and systemd
+# snippets, the documentation, and the test suite so the package can be
+# verified from source.
+include .env.example
+recursive-include deploy *
+recursive-include docs *.md
+recursive-include tests *.py

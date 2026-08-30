@@ -16,9 +16,16 @@ Sign in to your MUD with Discord, GitHub, Google, Microsoft, Apple, Twitch, Face
 
 ## Run
 
-    cp .env.example .env            # fill in AUTH_PUBLIC_BASE and one provider's id/secret
     mudauth serve --env-file .env   # listens on 127.0.0.1:7700
     mudauth check --env-file .env   # validates config and reaches the running service
+
+`.env` is yours to write: `AUTH_PUBLIC_BASE` and one provider's id and secret are
+enough to start. `pip`/`pipx` install only the Python code and the `mudauth`
+command, so the annotated template lives in the source rather than on your PATH —
+take it from a checkout, from the sdist, or straight from the repository:
+
+    curl -fsSLO https://raw.githubusercontent.com/StickMUD/mudauth/main/.env.example
+    cp .env.example .env
 
 Put a TLS reverse proxy in front of `AUTH_PUBLIC_BASE` and forward `/auth/` to the
 loopback listener. See [docs/deploy.md](docs/deploy.md) for systemd, nginx, and Apache.
