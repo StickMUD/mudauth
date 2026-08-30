@@ -1288,6 +1288,25 @@ class AuthServiceTokenConfigTest(unittest.TestCase):
         self.assertIn("AUTH_SERVICE_TOKEN", message)
         self.assertNotIn("s3cr3t token", message)
 
+    def test_a_fully_invalid_token_does_not_leak_its_characters(self):
+        # The degenerate case the previous message got wrong: when every
+        # character in the token is outside the charset (e.g. a
+        # single-character secret, or one that is entirely whitespace/control
+        # bytes), naming "the offending characters" names the whole token.
+        # The message must never contain any character actually present in
+        # the token, while still naming the accepted charset so an operator
+        # can act on it.
+        bad_token = "é\r"
+        with unittest.mock.patch.dict(
+            os.environ, {"AUTH_SERVICE_TOKEN": bad_token}
+        ), self.assertRaises(ValueError) as ctx:
+            server._configure_auth_service_token()
+        message = str(ctx.exception)
+        self.assertIn("AUTH_SERVICE_TOKEN", message)
+        for ch in bad_token:
+            self.assertNotIn(ch, message)
+        self.assertIn("A-Z a-z 0-9 _ -", message)
+
     def test_make_server_refuses_a_bad_charset_token_before_binding(self):
         with unittest.mock.patch.dict(
             os.environ, {"AUTH_SERVICE_TOKEN": "bad!token"}
@@ -1388,6 +1407,13 @@ class StdoutFlushTest(unittest.TestCase):
                 # deadline. Reading the raw fd ourselves and splitting lines
                 # by hand keeps select()'s readiness check honest.
                 fd = proc.stdout.fileno()
+                # The loop reads the raw fd rather than proc.stdout directly,
+                # but proc.stdout is still the text=True TextIOWrapper and
+                # carries the child's real encoding -- use it (with a UTF-8
+                # fallback and errors="replace") instead of a bare .decode(),
+                # which is strict UTF-8 and would raise if the child's locale
+                # encodes the startup banner's non-ASCII em-dash differently.
+                encoding = proc.stdout.encoding or "utf-8"
                 buf = b""
                 deadline = time.monotonic() + 3
                 seen = []
@@ -1416,7 +1442,7 @@ class StdoutFlushTest(unittest.TestCase):
                             )
                         buf += chunk
                         continue
-                    line = buf[: newline_at + 1].decode()
+                    line = buf[: newline_at + 1].decode(encoding, errors="replace")
                     buf = buf[newline_at + 1 :]
                     seen.append(line)
                     if "configuration error" in line:

@@ -241,15 +241,17 @@ def _configure_auth_service_token() -> str | None:
         _AUTH_SERVICE_TOKEN = None
         return None
     if not _TOKEN_CHARSET_RE.match(raw):
-        # Name the offending characters, never the token: enough for an
-        # operator to spot a stray copy-paste artifact without this message
-        # itself becoming a place the secret gets logged.
-        bad = sorted({c for c in raw if not _TOKEN_CHARSET_RE.match(c)})
+        # Report a count, never the offending characters themselves: if every
+        # character in the token is outside the charset (e.g. a
+        # single-character secret), naming them would name the whole token.
+        bad_count = len({c for c in raw if not _TOKEN_CHARSET_RE.match(c)})
         raise ValueError(
             "AUTH_SERVICE_TOKEN contains character(s) the client will never "
-            f"send: {bad!r}; only A-Z a-z 0-9 _ - are accepted. Generate a "
-            'safe token with: python3 -c "import secrets; '
-            'print(secrets.token_urlsafe(32))"'
+            f"send: {bad_count} distinct offending character(s); only A-Z "
+            "a-z 0-9 _ - are accepted. Whitespace or a control character -- "
+            "a trailing newline/carriage return or a stray space from a "
+            "copy-paste -- is the usual cause. Generate a safe token with: "
+            'python3 -c "import secrets; print(secrets.token_urlsafe(32))"'
         )
     _AUTH_SERVICE_TOKEN = raw
     return _AUTH_SERVICE_TOKEN
