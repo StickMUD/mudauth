@@ -183,9 +183,17 @@ curl -fsS https://mud.example/auth/healthz      # public path via the proxy
 curl -fsS http://127.0.0.1:7700/auth/providers  # loopback, on the server
 ```
 
-`mudauth check` prints the public base and the enabled providers with their callback
-URLs. It warns about a public base that already ends in `/auth` (which would produce
-`/auth/auth/*` URLs), and about any provider with only one of its two credentials set.
+`mudauth check` prints the public base, the bind address, and the enabled providers
+with their callback URLs. It warns about:
+
+- a public base that is not `https://` — including the unconfigured default
+  `http://localhost:7700`, which is fine only while you are testing locally;
+- a public base that already ends in `/auth` (which would produce `/auth/auth/*` URLs);
+- an `AUTH_BIND` that is not a loopback address — the listener has no authentication
+  of its own and must sit behind your proxy;
+- no provider configured at all, which is an install nobody can sign in to;
+- any provider with only one of its two credentials set.
+
 It then probes `/auth/healthz` on `AUTH_SERVICE_URL` if that is set, otherwise on the
 `AUTH_BIND` listener. It exits 0 when clean and 1 when it found problems, so it is
 usable from a monitoring script.

@@ -56,6 +56,47 @@ class CheckTest(unittest.TestCase):
              unittest.mock.patch("mudauth.client.request", return_value={"status": 200, "body": "{}"}):
             self.assertEqual(cli.main(["check"]), 0)
 
+    def _check(self, env):
+        out = io.StringIO()
+        with unittest.mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(out), \
+             unittest.mock.patch("mudauth.client.request", return_value={"status": 200, "body": "{}"}):
+            rc = cli.main(["check"])
+        return rc, out.getvalue()
+
+    def test_warns_when_public_base_is_not_https(self):
+        env = {"AUTH_PUBLIC_BASE": "http://mud.example", "GITHUB_CLIENT_ID": "i", "GITHUB_CLIENT_SECRET": "s"}
+        rc, out = self._check(env)
+        self.assertEqual(rc, 1)
+        self.assertIn("not https", out)
+
+    def test_warns_about_the_unconfigured_http_localhost_default(self):
+        # No AUTH_PUBLIC_BASE at all: the default is http://localhost:7700, so
+        # an install nobody configured must not report itself healthy.
+        env = {"GITHUB_CLIENT_ID": "i", "GITHUB_CLIENT_SECRET": "s"}
+        rc, out = self._check(env)
+        self.assertEqual(rc, 1)
+        self.assertIn("not https", out)
+        self.assertIn("local development", out)
+
+    def test_warns_when_bind_is_not_loopback(self):
+        env = {"AUTH_PUBLIC_BASE": "https://mud.example", "AUTH_BIND": "0.0.0.0:7700",
+               "GITHUB_CLIENT_ID": "i", "GITHUB_CLIENT_SECRET": "s"}
+        rc, out = self._check(env)
+        self.assertEqual(rc, 1)
+        self.assertIn("not a loopback address", out)
+
+    def test_loopback_binds_do_not_warn(self):
+        for bind in ("127.0.0.1:7700", "localhost:7700", "::1:7700", "127.0.0.2:7700"):
+            env = {"AUTH_PUBLIC_BASE": "https://mud.example", "AUTH_BIND": bind,
+                   "GITHUB_CLIENT_ID": "i", "GITHUB_CLIENT_SECRET": "s"}
+            rc, out = self._check(env)
+            self.assertEqual(rc, 0, (bind, out))
+
+    def test_warns_when_no_provider_is_configured(self):
+        rc, out = self._check({"AUTH_PUBLIC_BASE": "https://mud.example"})
+        self.assertEqual(rc, 1)
+        self.assertIn("no provider is configured", out)
+
 
 class ServeTest(unittest.TestCase):
     def test_serve_smoke(self):

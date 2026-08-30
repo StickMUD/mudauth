@@ -6,6 +6,7 @@ import argparse
 import os
 import sys
 import time
+from urllib.parse import urlsplit
 
 from . import __version__, client, server
 from .providers import SUPPORTED_PROVIDERS
@@ -33,6 +34,11 @@ def _apply_env_file(args: argparse.Namespace) -> None:
     if getattr(args, "env_file", None):
         for k, v in load_env_file(args.env_file).items():
             os.environ.setdefault(k, v)
+
+
+def _is_local_host(host: str) -> bool:
+    """True for a loopback literal or the name that resolves to one."""
+    return host == "localhost" or server._is_loopback(host)
 
 
 def _bind_host_port() -> tuple[str, int]:
@@ -76,9 +82,26 @@ def check(args: argparse.Namespace) -> int:
     if base.rstrip("/").endswith("/auth"):
         print("  WARNING: ends in /auth — the service adds /auth/* itself, so URLs would become /auth/auth/*")
         problems += 1
+    if not base.startswith("https://"):
+        # Everything the player's browser carries over this base is live: the
+        # provider redirect, the authorization code, the nonce. The default is
+        # http://localhost:7700, so an install nobody configured lands here.
+        if _is_local_host(urlsplit(base).hostname or ""):
+            print("  WARNING: not https — a loopback base only works for local development; players need an https AUTH_PUBLIC_BASE behind your TLS proxy")
+        else:
+            print("  WARNING: not https — the login URL and the provider redirect would cross the network in the clear")
+        problems += 1
+    host, port = _bind_host_port()
+    print(f"AUTH_BIND: {host}:{port}")
+    if not _is_local_host(host):
+        print("  WARNING: not a loopback address — this listener has no authentication of its own and must not be reachable off-box; bind 127.0.0.1 and let your reverse proxy front it")
+        problems += 1
     configs = server._load_provider_configs()
     enabled = sorted(configs)
     print(f"providers enabled: {', '.join(enabled) or '(none)'}")
+    if not enabled:
+        print("  WARNING: no provider is configured — nobody can sign in; set a <PROVIDER>_CLIENT_ID and _CLIENT_SECRET (or STEAM_API_KEY)")
+        problems += 1
     for p in sorted(SUPPORTED_PROVIDERS):
         if p not in configs and (os.environ.get(f"{p.upper()}_CLIENT_ID") or os.environ.get(f"{p.upper()}_CLIENT_SECRET")):
             print(f"  WARNING: {p} has only one of CLIENT_ID / CLIENT_SECRET set; it is disabled")
