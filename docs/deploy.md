@@ -25,11 +25,24 @@ dependencies. (`mudauth apple-secret` is the one exception — it needs the opti
 
 The service is stateless, so there is no data directory to provision.
 
-## 2. Configure the environment
+### Get the support files
 
-`.env.example` and the files under `deploy/` are not installed by the package; take
-them from a checkout or download of the source repository (the `Homepage` URL in the
-package metadata).
+`.env.example` and everything under `deploy/` are **not** installed by the package —
+`pipx`/`pip` ship only the Python code and the `mudauth` entry point. Every `sudo cp`
+in the steps below copies from a checkout of the source repository, so fetch one now.
+The repository URL is the `Home-page` field of the installed package metadata:
+
+```bash
+pipx runpip mudauth show mudauth | grep '^Home-page:'   # pip show mudauth, if you used pip
+git clone <that URL> ~/mudauth-src                      # or download and unpack the zip
+cd ~/mudauth-src
+```
+
+Run the rest of this guide from that directory. Nothing on the host depends on it
+afterwards — it is only a source of files to copy — so you can delete it once the
+service is up.
+
+## 2. Configure the environment
 
 ```bash
 sudo mkdir -p /etc/mudauth
@@ -66,23 +79,36 @@ journalctl -u mudauth -f
 > somewhere outside `/home`, point `ExecStart` there and tighten to
 > `ProtectHome=yes`.
 
-## 4. Add the nginx proxy and TLS
+## 4. Add the reverse proxy and TLS
 
-> Using Apache instead of nginx? See [`../deploy/apache/mudauth.conf`](../deploy/apache/mudauth.conf)
-> for the equivalent `ProxyPass` directives; the rest of this section is nginx-specific.
+Use whichever of the two sections below matches your web server. Skip the other one.
 
-Add the `/auth/` location block to the HTTPS `server { }` for mud.example, and
-define the rate-limit zone once at `http{}` scope:
+### nginx
+
+Install the shipped `/auth/` location block as an nginx snippet:
+
+```bash
+sudo mkdir -p /etc/nginx/snippets
+sudo cp deploy/nginx/mudauth.conf /etc/nginx/snippets/mudauth.conf
+```
+
+Then define the rate-limit zone once at `http{}` scope, and include the snippet from
+the HTTPS `server { }` block that serves mud.example — the same block certbot manages:
 
 ```nginx
 # http { } scope
 limit_req_zone $binary_remote_addr zone=auth:10m rate=10r/s;
 ```
 
-```bash
-# inside the mud.example server block
-include snippets/mudauth.conf;   # from deploy/nginx/mudauth.conf
+```nginx
+# inside the mud.example server { } block
+include snippets/mudauth.conf;
 ```
+
+(If you would rather not keep a snippet file, paste the contents of
+[`../deploy/nginx/mudauth.conf`](../deploy/nginx/mudauth.conf) into the `server { }`
+block instead of the `include` line. The `limit_req_zone` still has to go at `http{}`
+scope either way.)
 
 Then obtain/renew TLS and reload:
 
@@ -90,6 +116,33 @@ Then obtain/renew TLS and reload:
 sudo certbot --nginx -d mud.example -d www.mud.example
 sudo nginx -t && sudo systemctl reload nginx
 ```
+
+### Apache
+
+Apache has no snippet-include convention to copy a file into, so these directives go
+**inside** the HTTPS `<VirtualHost *:443>` that serves mud.example — the block certbot
+manages, typically `/etc/apache2/sites-available/mud.example-le-ssl.conf`. Find it with
+`sudo apache2ctl -S`:
+
+```apache
+ProxyPreserveHost On
+RequestHeader set X-Forwarded-Proto "https"
+
+ProxyPass        /auth/ http://127.0.0.1:7700/auth/
+ProxyPassReverse /auth/ http://127.0.0.1:7700/auth/
+```
+
+Enable the modules once, then validate and reload:
+
+```bash
+sudo a2enmod proxy proxy_http headers
+sudo certbot --apache -d mud.example -d www.mud.example
+sudo apache2ctl configtest && sudo systemctl reload apache2
+```
+
+[`../deploy/apache/mudauth.conf`](../deploy/apache/mudauth.conf) is the same snippet
+with commentary on canonical hosts, rate limiting, and running a second instance. Do
+not `Include` it as a vhost of its own.
 
 ## 5. Point the running game at the service
 

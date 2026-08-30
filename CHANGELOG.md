@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.1.0 — 2026-09
+## 0.1.0 — unreleased
+
+(Dated at tag time.)
 
 First public release, extracted from the auth service of an existing LDMud game.
 
