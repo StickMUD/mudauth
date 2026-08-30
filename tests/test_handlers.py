@@ -444,6 +444,18 @@ class HandlerTest(unittest.TestCase):
         )
         self.assertEqual(status, 200)
 
+    def test_responses_carry_the_hardening_headers(self):
+        # These pages render on the operator's public MUD origin.
+        with self._get("/auth/providers") as r:  # JSON path
+            self.assertEqual(r.headers["X-Content-Type-Options"], "nosniff")
+            self.assertEqual(r.headers["Referrer-Policy"], "no-referrer")
+        try:
+            self._get("/auth/login/nope/1e1e1e1e-1111-1111-1111-111111111111")
+            self.fail("expected HTTPError 404")
+        except urllib.error.HTTPError as e:  # HTML path
+            self.assertEqual(e.headers["X-Content-Type-Options"], "nosniff")
+            self.assertEqual(e.headers["Referrer-Policy"], "no-referrer")
+
     def test_login_with_a_malformed_nonce_is_400(self):
         try:
             self._get("/auth/login/github/not-a-uuid")

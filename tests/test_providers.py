@@ -562,6 +562,17 @@ class SteamTest(unittest.TestCase):
         })
         self.assertIsNone(providers.verify_steam_assertion(q, STEAM_CFG))
 
+    def test_non_ascii_digit_steamid_is_rejected(self):
+        # "\u0661\u0662\u0663".isdigit() is True, and this value becomes the
+        # game's account key, so the check must be ASCII digits.
+        self._forbid_network()
+        q = self._q(**{
+            "openid.claimed_id": [
+                "https://steamcommunity.com/openid/id/7656119801234\u0661\u0662\u0663\u0664"
+            ]
+        })
+        self.assertIsNone(providers.verify_steam_assertion(q, STEAM_CFG))
+
     def test_non_id_res_mode_is_rejected_before_any_network(self):
         self._forbid_network()
         q = self._q(**{"openid.mode": ["cancel"]})

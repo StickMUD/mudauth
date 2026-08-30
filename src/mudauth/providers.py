@@ -417,7 +417,9 @@ def verify_steam_assertion(q: dict, cfg: ProviderConfig) -> str | None:
         print(f"[auth] steam: foreign claimed_id rejected: {claimed[:100]!r}")
         return None
     steamid = claimed[len(_STEAM_CLAIMED_ID_PREFIX):]
-    if not steamid.isdigit():
+    # ASCII digits only: str.isdigit() also accepts Arabic-Indic and other
+    # Unicode digits, and this value becomes the game's account key.
+    if not (steamid.isascii() and steamid.isdigit()):
         print(f"[auth] steam: non-numeric steamid rejected: {steamid[:100]!r}")
         return None
     # return_to is Steam-signed: its origin must be exactly our callback and

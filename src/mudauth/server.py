@@ -247,12 +247,20 @@ class AuthHandler(BaseHTTPRequestHandler):
 
     # ── responses ─────────────────────────────────────────────────────────
 
+    def _security_headers(self) -> None:
+        """Headers every response carries; these pages render on the MUD's own
+        public origin, so they must not be sniffed into another type and must
+        not leak a nonce- or code-bearing URL in a Referer."""
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+
     def _json(self, code: int, payload: dict) -> None:
         body = json.dumps(payload).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self._security_headers()
         self.end_headers()
         self.wfile.write(body)
 
@@ -262,6 +270,7 @@ class AuthHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self._security_headers()
         self.end_headers()
         self.wfile.write(body)
 
@@ -357,7 +366,7 @@ class AuthHandler(BaseHTTPRequestHandler):
         cfg = self.configs.get(provider)
         if not cfg:
             print(f"[auth] {provider} callback: provider no longer configured")
-            self._html(503, f"Provider '{provider}' is no longer configured.")
+            self._html(503, f"Provider '{html.escape(provider)}' is no longer configured.")
             return
 
         if provider == "steam":
@@ -396,7 +405,8 @@ class AuthHandler(BaseHTTPRequestHandler):
             return
         user = providers.fetch_provider_user(provider, cfg, access)
         if not user:
-            self._html(502, f"Could not fetch your {providers.display_name(provider)} profile.")
+            name = html.escape(providers.display_name(provider))
+            self._html(502, f"Could not fetch your {name} profile.")
             return
 
         nonce = pending.get("login_nonce")
