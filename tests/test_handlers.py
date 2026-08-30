@@ -1378,14 +1378,51 @@ class StdoutFlushTest(unittest.TestCase):
             text=True,
         ) as proc:
             try:
-                ready, _, _ = select.select([proc.stdout], [], [], 3)
-                self.assertTrue(
-                    ready,
-                    "no output arrived on the piped stdout within 3s -- diagnostics "
-                    "are sitting unflushed in the block buffer",
-                )
-                line = proc.stdout.readline()
-                self.assertIn("[auth]", line)
+                banner_marker = f"mudauth {server.__version__} on "
+                # Reading through proc.stdout.readline() gated behind select()
+                # is unsafe here: readline()'s underlying BufferedReader may
+                # slurp several already-flushed lines out of the OS pipe in
+                # one read(), leaving later lines sitting in Python's own
+                # buffer while select() -- which only sees the now-empty OS
+                # pipe -- reports not-ready and stalls the loop until the
+                # deadline. Reading the raw fd ourselves and splitting lines
+                # by hand keeps select()'s readiness check honest.
+                fd = proc.stdout.fileno()
+                buf = b""
+                deadline = time.monotonic() + 3
+                seen = []
+                while True:
+                    newline_at = buf.find(b"\n")
+                    if newline_at == -1:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            self.fail(
+                                "the startup banner never arrived on the piped "
+                                "stdout within 3s -- diagnostics are sitting "
+                                f"unflushed in the block buffer; lines seen so far: {seen!r}"
+                            )
+                        ready, _, _ = select.select([fd], [], [], remaining)
+                        if not ready:
+                            continue
+                        chunk = os.read(fd, 65536)
+                        if chunk == b"":
+                            try:
+                                exit_code = proc.wait(timeout=1)
+                            except subprocess.TimeoutExpired:
+                                exit_code = proc.poll()
+                            self.fail(
+                                "piped stdout hit EOF before the startup banner "
+                                f"arrived (exit code {exit_code}); lines seen so far: {seen!r}"
+                            )
+                        buf += chunk
+                        continue
+                    line = buf[: newline_at + 1].decode()
+                    buf = buf[newline_at + 1 :]
+                    seen.append(line)
+                    if "configuration error" in line:
+                        self.fail(f"service refused to start: {line!r}")
+                    if banner_marker in line:
+                        break
             finally:
                 proc.terminate()
                 try:
