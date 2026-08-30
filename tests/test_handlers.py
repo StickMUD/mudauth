@@ -55,6 +55,19 @@ def _hops(count):
         server._TRUSTED_PROXY_HOPS = original
 
 
+@contextlib.contextmanager
+def _token(value):
+    """Set the startup-validated AUTH_SERVICE_TOKEN for the duration of the
+    block, the same way ``_hops`` does for the proxy hop count.
+    """
+    original = server._AUTH_SERVICE_TOKEN
+    server._AUTH_SERVICE_TOKEN = value
+    try:
+        yield
+    finally:
+        server._AUTH_SERVICE_TOKEN = original
+
+
 class HandlerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -426,10 +439,15 @@ class HandlerTest(unittest.TestCase):
         self.assertEqual(body["provider_id"], "42")
 
     def test_browser_login_is_still_pollable_by_the_headerless_mud(self):
-        # The live path a game uses: the player's browser starts the flow
+        # THE CRITICAL NON-REGRESSION: pins the live path with
+        # AUTH_SERVICE_TOKEN unset (today's deployment, until the migration in
+        # docs/deploy.md is carried out). The player's browser starts the flow
         # through the reverse proxy (origin recorded as the real client IP),
-        # and the game polls over loopback with no forwarding headers. That
-        # poll is exempt from the binding and must still retrieve the identity.
+        # and the game polls over loopback with no forwarding headers and no
+        # token. That poll is exempt from the binding on header-absence alone
+        # and must still retrieve the identity -- this is the deliberate,
+        # required backward-compatible path.
+        self.assertIsNone(server._AUTH_SERVICE_TOKEN)
         nonce = "5c5c5c5c-5555-5555-5555-555555555555"
         with self._get_with_headers(
             f"/auth/login/github/{nonce}",
@@ -445,6 +463,160 @@ class HandlerTest(unittest.TestCase):
         status, body = self._get_json(f"/auth/token-poll?nonce={nonce}")
         self.assertEqual(status, 200)
         self.assertEqual(body["provider_id"], "42")
+
+    def test_browser_login_headerless_poll_is_refused_once_a_token_is_configured(self):
+        # The other half of the non-regression: once AUTH_SERVICE_TOKEN is
+        # configured, a headerless loopback poll -- the very thing the
+        # previous test proves still works today -- must NO LONGER be granted
+        # the exemption. Header-absence alone stops being sufficient; that is
+        # the whole point of wave 2. The identity survives the rejection and
+        # is retrievable with the token, so nothing was lost, only gated.
+        nonce = "5d5d5d5d-5555-5555-5555-555555555555"
+        with self._get_with_headers(
+            f"/auth/login/github/{nonce}",
+            {"X-Forwarded-For": "198.51.100.9, 203.0.113.7"},
+        ) as r:
+            state = parse_qs(urlparse(r.headers["Location"]).query)["state"][0]
+        with self._get_with_headers(
+            f"/auth/callback?code=abc&state={state}",
+            {"X-Forwarded-For": "198.51.100.9, 203.0.113.7"},
+        ) as r:
+            self.assertEqual(r.status, 200)
+
+        with _token("s3cr3t"):
+            try:
+                self._get_json(f"/auth/token-poll?nonce={nonce}")
+                self.fail("expected HTTPError 403")
+            except urllib.error.HTTPError as e:
+                self.assertEqual(e.code, 403)
+
+            status, body = self._get_json_with_headers(
+                f"/auth/token-poll?nonce={nonce}",
+                {server.AUTH_SERVICE_TOKEN_HEADER: "s3cr3t"},
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(body["provider_id"], "42")
+
+    def test_wrong_token_is_refused_like_no_token_at_all(self):
+        nonce = "5e5e5e5e-5555-5555-5555-555555555555"
+        with self._get_with_headers(
+            f"/auth/login/github/{nonce}",
+            {"X-Forwarded-For": "198.51.100.9, 203.0.113.7"},
+        ) as r:
+            state = parse_qs(urlparse(r.headers["Location"]).query)["state"][0]
+        with self._get_with_headers(
+            f"/auth/callback?code=abc&state={state}",
+            {"X-Forwarded-For": "198.51.100.9, 203.0.113.7"},
+        ) as r:
+            self.assertEqual(r.status, 200)
+
+        with _token("s3cr3t"):
+            try:
+                self._get_json_with_headers(
+                    f"/auth/token-poll?nonce={nonce}",
+                    {server.AUTH_SERVICE_TOKEN_HEADER: "not-the-secret"},
+                )
+                self.fail("expected HTTPError 403")
+            except urllib.error.HTTPError as e:
+                self.assertEqual(e.code, 403)
+
+            # The identity survived; the real origin (or the token) still gets it.
+            status, body = self._get_json_with_headers(
+                f"/auth/token-poll?nonce={nonce}",
+                {"X-Forwarded-For": "198.51.100.9, 203.0.113.7"},
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(body["provider_id"], "42")
+
+    def test_a_valid_token_from_a_non_loopback_peer_is_still_refused(self):
+        # Defense in depth: possessing the secret is not enough on its own,
+        # the peer must also be loopback. Otherwise a leaked token would let
+        # anyone on the internet claim the game's exemption outright.
+        nonce = "5f5f5f5f-5555-5555-5555-555555555555"
+        with self._get_with_headers(
+            f"/auth/login/github/{nonce}",
+            {"X-Forwarded-For": "198.51.100.9, 203.0.113.7"},
+        ) as r:
+            state = parse_qs(urlparse(r.headers["Location"]).query)["state"][0]
+        with self._get_with_headers(
+            f"/auth/callback?code=abc&state={state}",
+            {"X-Forwarded-For": "198.51.100.9, 203.0.113.7"},
+        ) as r:
+            self.assertEqual(r.status, 200)
+
+        with _token("s3cr3t"), self._non_loopback_peer():
+            try:
+                self._get_json_with_headers(
+                    f"/auth/token-poll?nonce={nonce}",
+                    {server.AUTH_SERVICE_TOKEN_HEADER: "s3cr3t"},
+                )
+                self.fail("expected HTTPError 403")
+            except urllib.error.HTTPError as e:
+                self.assertEqual(e.code, 403)
+
+    def test_login_cancel_honors_the_token_exemption(self):
+        nonce = "5a5b5c5d-5555-5555-5555-555555555555"
+        with self._get_with_headers(
+            f"/auth/login/github/{nonce}",
+            {"X-Forwarded-For": "198.51.100.9, 203.0.113.7"},
+        ) as r:
+            state = parse_qs(urlparse(r.headers["Location"]).query)["state"][0]
+        with self._get_with_headers(
+            f"/auth/callback?code=abc&state={state}",
+            {"X-Forwarded-For": "198.51.100.9, 203.0.113.7"},
+        ) as r:
+            self.assertEqual(r.status, 200)
+
+        with _token("s3cr3t"):
+            # Headerless (no token) loopback cancel is refused, same as a poll.
+            try:
+                self._post_json("/auth/login-cancel", {"nonce": nonce})
+                self.fail("expected HTTPError 403")
+            except urllib.error.HTTPError as e:
+                self.assertEqual(e.code, 403)
+
+            status, body = self._post_json_with_headers(
+                "/auth/login-cancel", {"nonce": nonce},
+                {server.AUTH_SERVICE_TOKEN_HEADER: "s3cr3t"},
+            )
+            self.assertEqual(status, 200)
+            self.assertGreaterEqual(body["cancelled"], 1)
+
+    def test_the_token_value_never_appears_in_service_output(self):
+        # Exercise every rejection path a token can trigger and grep the
+        # captured stdout for the secret. A bearer credential in a log line
+        # is as bad as one in the request line the previous wave redacted.
+        secret = "sekrit-token-should-never-be-logged-xyz123"
+        nonce = "5b5c5d5e-5555-5555-5555-555555555555"
+        with self._get_with_headers(
+            f"/auth/login/github/{nonce}",
+            {"X-Forwarded-For": "198.51.100.9, 203.0.113.7"},
+        ) as r:
+            state = parse_qs(urlparse(r.headers["Location"]).query)["state"][0]
+        with self._get_with_headers(
+            f"/auth/callback?code=abc&state={state}",
+            {"X-Forwarded-For": "198.51.100.9, 203.0.113.7"},
+        ) as r:
+            self.assertEqual(r.status, 200)
+
+        out = io.StringIO()
+        with _token(secret), contextlib.redirect_stdout(out):
+            # Wrong token, from loopback: hits the dedicated exemption-denied
+            # log line plus the origin-mismatch line.
+            try:
+                self._get_json_with_headers(
+                    f"/auth/token-poll?nonce={nonce}",
+                    {server.AUTH_SERVICE_TOKEN_HEADER: secret + "-wrong"},
+                )
+            except urllib.error.HTTPError:
+                pass
+            # Correct token: the success path, which logs nothing at all
+            # about the request.
+            self._get_json_with_headers(
+                f"/auth/token-poll?nonce={nonce}",
+                {server.AUTH_SERVICE_TOKEN_HEADER: secret},
+            )
+        self.assertNotIn(secret, out.getvalue())
 
     def test_poll_of_an_entry_with_no_recorded_origin_is_rejected(self):
         # A falsy origin used to short-circuit the whole comparison, so the
@@ -850,6 +1022,77 @@ class ClientIPTest(unittest.TestCase):
             self.assertEqual(server._client_ip(h), "10.0.0.2")
 
 
+class TrustedLoopbackTokenTest(unittest.TestCase):
+    """Unit tests for the token half of the exemption decision.
+
+    Mirrors ClientIPTest: the end-to-end tests in HandlerTest cover wiring,
+    these pin _is_trusted_loopback itself, including the non-loopback-peer
+    case a loopback-bound test server cannot produce directly.
+    """
+
+    def setUp(self):
+        self._original = server._AUTH_SERVICE_TOKEN
+
+    def tearDown(self):
+        server._AUTH_SERVICE_TOKEN = self._original
+
+    def test_correct_token_from_loopback_is_trusted(self):
+        server._AUTH_SERVICE_TOKEN = "s3cr3t"
+        h = _stub_handler("127.0.0.1", (server.AUTH_SERVICE_TOKEN_HEADER, "s3cr3t"))
+        self.assertTrue(server._is_trusted_loopback(h))
+
+    def test_correct_token_is_trusted_even_alongside_forwarding_headers(self):
+        # Positive evidence is now the whole test; header-absence is no
+        # longer part of the decision once a token is configured.
+        server._AUTH_SERVICE_TOKEN = "s3cr3t"
+        h = _stub_handler(
+            "127.0.0.1",
+            (server.AUTH_SERVICE_TOKEN_HEADER, "s3cr3t"),
+            ("X-Forwarded-For", "203.0.113.7"),
+        )
+        self.assertTrue(server._is_trusted_loopback(h))
+
+    def test_missing_token_when_configured_is_not_trusted(self):
+        server._AUTH_SERVICE_TOKEN = "s3cr3t"
+        h = _stub_handler("127.0.0.1")
+        self.assertFalse(server._is_trusted_loopback(h))
+
+    def test_wrong_token_when_configured_is_not_trusted(self):
+        server._AUTH_SERVICE_TOKEN = "s3cr3t"
+        h = _stub_handler("127.0.0.1", (server.AUTH_SERVICE_TOKEN_HEADER, "wrong"))
+        self.assertFalse(server._is_trusted_loopback(h))
+
+    def test_a_non_ascii_token_header_fails_closed_instead_of_raising(self):
+        # hmac.compare_digest raises TypeError on non-ASCII str input. The
+        # header is attacker-controlled even on this loopback-only branch --
+        # a local process or SSRF without the real token is exactly the
+        # caller this token is meant to keep out -- so a malformed value must
+        # fail the check, not crash the request thread.
+        server._AUTH_SERVICE_TOKEN = "s3cr3t"
+        h = _stub_handler("127.0.0.1", (server.AUTH_SERVICE_TOKEN_HEADER, "héllo-not-ascii"))
+        self.assertFalse(server._is_trusted_loopback(h))
+
+    def test_correct_token_from_a_non_loopback_peer_is_not_trusted(self):
+        server._AUTH_SERVICE_TOKEN = "s3cr3t"
+        h = _stub_handler(
+            "203.0.113.99", (server.AUTH_SERVICE_TOKEN_HEADER, "s3cr3t")
+        )
+        self.assertFalse(server._is_trusted_loopback(h))
+
+    def test_unset_token_keeps_the_legacy_header_absence_rule(self):
+        server._AUTH_SERVICE_TOKEN = None
+        self.assertTrue(server._is_trusted_loopback(_stub_handler("127.0.0.1")))
+        self.assertFalse(server._is_trusted_loopback(
+            _stub_handler("127.0.0.1", ("X-Forwarded-For", "203.0.113.7"))
+        ))
+        # A stray token header does nothing when unconfigured -- there is no
+        # secret to compare it against, so the legacy rule alone decides, and
+        # a token header is neither X-Forwarded-For nor X-Real-IP.
+        self.assertTrue(server._is_trusted_loopback(
+            _stub_handler("127.0.0.1", (server.AUTH_SERVICE_TOKEN_HEADER, "s3cr3t"))
+        ))
+
+
 class TrustedProxyHopsConfigTest(unittest.TestCase):
     """The hop count is parsed and validated once, at startup.
 
@@ -898,6 +1141,67 @@ class TrustedProxyHopsConfigTest(unittest.TestCase):
         ), self.assertRaises(ValueError) as ctx:
             server.make_server("127.0.0.1", 0)
         self.assertIn("AUTH_TRUSTED_PROXY_HOPS", str(ctx.exception))
+
+
+class AuthServiceTokenConfigTest(unittest.TestCase):
+    """AUTH_SERVICE_TOKEN is read once at startup, mirroring the hop count."""
+
+    def setUp(self):
+        self._original = server._AUTH_SERVICE_TOKEN
+
+    def tearDown(self):
+        server._AUTH_SERVICE_TOKEN = self._original
+
+    def test_an_unset_value_is_none(self):
+        with unittest.mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AUTH_SERVICE_TOKEN", None)
+            self.assertIsNone(server._configure_auth_service_token())
+        self.assertIsNone(server._AUTH_SERVICE_TOKEN)
+
+    def test_an_empty_value_is_treated_as_unset(self):
+        with unittest.mock.patch.dict(os.environ, {"AUTH_SERVICE_TOKEN": ""}):
+            self.assertIsNone(server._configure_auth_service_token())
+
+    def test_a_set_value_is_adopted(self):
+        with unittest.mock.patch.dict(os.environ, {"AUTH_SERVICE_TOKEN": "s3cr3t"}):
+            self.assertEqual(server._configure_auth_service_token(), "s3cr3t")
+        self.assertEqual(server._AUTH_SERVICE_TOKEN, "s3cr3t")
+
+    @staticmethod
+    def _serve_and_close(httpd):
+        """shutdown() waits on an event only serve_forever() sets, so a
+        server that never started serving hangs forever on shutdown."""
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        httpd.shutdown()
+        thread.join()
+        httpd.server_close()
+
+    def test_make_server_warns_on_startup_when_the_token_is_unset(self):
+        out = io.StringIO()
+        with unittest.mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AUTH_SERVICE_TOKEN", None)
+            with contextlib.redirect_stdout(out):
+                httpd = server.make_server("127.0.0.1", 0)
+        try:
+            self.assertIn("AUTH_SERVICE_TOKEN is not set", out.getvalue())
+            self.assertIn("NOT SET", out.getvalue())
+        finally:
+            self._serve_and_close(httpd)
+
+    def test_make_server_does_not_warn_when_the_token_is_set(self):
+        out = io.StringIO()
+        with (
+            unittest.mock.patch.dict(os.environ, {"AUTH_SERVICE_TOKEN": "s3cr3t"}),
+            contextlib.redirect_stdout(out),
+        ):
+            httpd = server.make_server("127.0.0.1", 0)
+        try:
+            self.assertNotIn("AUTH_SERVICE_TOKEN is not set", out.getvalue())
+            self.assertIn("configured", out.getvalue())
+            self.assertNotIn("s3cr3t", out.getvalue())
+        finally:
+            self._serve_and_close(httpd)
 
 
 if __name__ == "__main__":

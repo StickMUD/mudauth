@@ -1,4 +1,5 @@
 import json
+import os
 import threading
 import unittest
 import unittest.mock
@@ -12,7 +13,10 @@ class _Echo(BaseHTTPRequestHandler):
         self.send_response(404 if self.path == "/missing" else 200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(json.dumps({"path": self.path}).encode())
+        self.wfile.write(json.dumps({
+            "path": self.path,
+            "token": self.headers.get(client.AUTH_SERVICE_TOKEN_HEADER),
+        }).encode())
 
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
@@ -40,7 +44,7 @@ class ClientTest(unittest.TestCase):
     def test_get_returns_status_and_body(self):
         r = client.request("GET", "/auth/healthz", base_url=self.base)
         self.assertEqual(r["status"], 200)
-        self.assertEqual(json.loads(r["body"]), {"path": "/auth/healthz"})
+        self.assertEqual(json.loads(r["body"])["path"], "/auth/healthz")
 
     def test_non_2xx_is_returned_not_raised(self):
         self.assertEqual(client.request("GET", "/missing", base_url=self.base)["status"], 404)
@@ -66,3 +70,25 @@ class ClientTest(unittest.TestCase):
     def test_efun_rejects_unknown_method(self):
         out = json.loads(ldmud.auth_service_request("DELETE", "/", ""))
         self.assertEqual(out["status"], 0)
+
+    def test_sends_the_token_header_when_the_env_var_is_set(self):
+        with unittest.mock.patch.dict(os.environ, {"AUTH_SERVICE_TOKEN": "s3cr3t"}):
+            r = client.request("GET", "/x", base_url=self.base)
+        self.assertEqual(json.loads(r["body"])["token"], "s3cr3t")
+
+    def test_omits_the_token_header_when_the_env_var_is_unset(self):
+        with unittest.mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AUTH_SERVICE_TOKEN", None)
+            r = client.request("GET", "/x", base_url=self.base)
+        self.assertIsNone(json.loads(r["body"])["token"])
+
+    def test_token_is_resolved_at_call_time_not_import_time(self):
+        # Set the env var only after the module has already been imported
+        # (it was, at the top of this file), then change it between two
+        # calls in the same process -- both must reflect the live value.
+        with unittest.mock.patch.dict(os.environ, {"AUTH_SERVICE_TOKEN": "first"}):
+            r1 = client.request("GET", "/x", base_url=self.base)
+        with unittest.mock.patch.dict(os.environ, {"AUTH_SERVICE_TOKEN": "second"}):
+            r2 = client.request("GET", "/x", base_url=self.base)
+        self.assertEqual(json.loads(r1["body"])["token"], "first")
+        self.assertEqual(json.loads(r2["body"])["token"], "second")

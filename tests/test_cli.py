@@ -97,6 +97,23 @@ class CheckTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("no provider is configured", out)
 
+    def test_reports_auth_service_token_unset(self):
+        # Unset is legitimate and backward-compatible, so it must not itself
+        # add to `problems` -- only surface it for visibility.
+        env = {"AUTH_PUBLIC_BASE": "https://mud.example", "DISCORD_CLIENT_ID": "i",
+               "DISCORD_CLIENT_SECRET": "s"}
+        rc, out = self._check(env)
+        self.assertEqual(rc, 0)
+        self.assertIn("AUTH_SERVICE_TOKEN: not set", out)
+
+    def test_reports_auth_service_token_configured_without_leaking_it(self):
+        env = {"AUTH_PUBLIC_BASE": "https://mud.example", "DISCORD_CLIENT_ID": "i",
+               "DISCORD_CLIENT_SECRET": "s", "AUTH_SERVICE_TOKEN": "s3cr3t-value"}
+        rc, out = self._check(env)
+        self.assertEqual(rc, 0)
+        self.assertIn("AUTH_SERVICE_TOKEN: configured", out)
+        self.assertNotIn("s3cr3t-value", out)
+
 
 class ServeTest(unittest.TestCase):
     def test_serve_smoke(self):
