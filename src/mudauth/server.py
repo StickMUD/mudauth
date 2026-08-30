@@ -26,13 +26,16 @@ Security model (adapted from MUDdown's auth.ts for loopback):
   * ``login_nonce`` is a client UUID; the verified identity is returned exactly
     once from token-poll then deleted; 10-minute TTL;
   * the IP that started the flow is recorded and must match the poller, except
-    trusted loopback callers (the MUD) which are exempt;
+    trusted loopback callers (the MUD) which are exempt. Forwarding headers are
+    read only from a loopback peer (our own reverse proxy) and only from the
+    right-hand end, so a caller cannot name its own origin;
   * provider ``client_secret`` lives only in this service's config.
 """
 
 from __future__ import annotations
 
 import html
+import ipaddress
 import json
 import os
 import re
@@ -116,24 +119,68 @@ class _State:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
+def _is_loopback(addr: str | None) -> bool:
+    """True for 127.0.0.0/8, ::1, and the IPv4-mapped forms of both."""
+    if not addr:
+        return False
+    try:
+        return ipaddress.ip_address(addr).is_loopback
+    except ValueError:
+        return False
+
+
+def _trusted_proxy_hops() -> int:
+    """How many proxies append to X-Forwarded-For before it reaches us."""
+    try:
+        hops = int(os.environ.get("AUTH_TRUSTED_PROXY_HOPS", "1"))
+    except ValueError:
+        return 1
+    return max(hops, 1)
+
+
 def _client_ip(handler: BaseHTTPRequestHandler) -> str | None:
-    xff = handler.headers.get("X-Forwarded-For")
-    if xff:
-        first = xff.split(",")[0].strip()
-        if first:
-            return first
-    xri = handler.headers.get("X-Real-IP")
-    if xri:
-        return xri.strip()
-    addr = handler.client_address[0] if handler.client_address else None
-    return addr
+    """The address the request really came from.
+
+    Forwarding headers are hearsay from whoever sent them, so they are read
+    only when the immediate peer is loopback — i.e. our own reverse proxy,
+    since the listener is loopback-only. From anyone else the socket address is
+    the only truth.
+
+    Within X-Forwarded-For, the *rightmost* element is the one our proxy
+    appended (both shipped configs append rather than replace, as does Apache's
+    mod_proxy), so everything to its left is whatever the client chose to send.
+    ``AUTH_TRUSTED_PROXY_HOPS`` counts back further for a chain of proxies; a
+    list shorter than the configured chain is not the shape we were promised,
+    so it is discarded rather than half-trusted.
+    """
+    peer = handler.client_address[0] if handler.client_address else None
+    if not _is_loopback(peer):
+        return peer
+    # Repeated header lines are one list; a client can send its own line and a
+    # proxy may append a second rather than merging them.
+    lines = handler.headers.get_all("X-Forwarded-For") or []
+    parts = [p.strip() for line in lines for p in line.split(",") if p.strip()]
+    if parts:
+        hops = _trusted_proxy_hops()
+        if hops <= len(parts):
+            return parts[-hops]
+        return peer
+    real = (handler.headers.get_all("X-Real-IP") or [""])[-1].strip()
+    return real or peer
 
 
 def _is_trusted_loopback(handler: BaseHTTPRequestHandler) -> bool:
+    """True only for a direct loopback caller — in practice, the game itself.
+
+    Our own proxy also reaches us over loopback, so the peer address alone
+    cannot tell the game apart from a browser on the far side of the proxy.
+    The forwarding headers are what distinguish them: a request carrying one
+    passed through the proxy and stands for a remote client, so it keeps the
+    origin binding instead of inheriting the game's exemption.
+    """
     if "X-Forwarded-For" in handler.headers or "X-Real-IP" in handler.headers:
         return False
-    addr = handler.client_address[0] if handler.client_address else ""
-    return addr in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+    return _is_loopback(handler.client_address[0] if handler.client_address else None)
 
 
 _UUID_RE = re.compile(

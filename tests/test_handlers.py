@@ -8,10 +8,13 @@ owns accounts, characters and the login/link/create decision, so there are no
 DB-backed endpoints to test here.
 """
 
+import contextlib
+import email.message
 import html
 import json
 import os
 import threading
+import types
 import unittest
 import unittest.mock
 import urllib.error
@@ -99,6 +102,30 @@ class HandlerTest(unittest.TestCase):
     def _get_json_with_headers(self, path, headers):
         with self._get_with_headers(path, headers) as r:
             return r.status, json.loads(r.read().decode())
+
+    @contextlib.contextmanager
+    def _non_loopback_peer(self, addr="203.0.113.99"):
+        """Make requests inside the block look like they came from off-box.
+
+        The test server binds 127.0.0.1, so every real client is a loopback
+        peer and the branch that ignores forwarding headers from a stranger
+        would never run. ``BaseRequestHandler.__init__`` assigns
+        ``client_address`` and then calls ``setup()``, so rewriting the address
+        in a patched ``setup`` gives the handler exactly the state it would
+        have on a request from that address — the whole dispatch, the origin
+        check and the response path are the real ones.
+        """
+        original = server.AuthHandler.setup
+
+        def setup(handler):
+            original(handler)
+            handler.client_address = (addr, 54321)
+
+        server.AuthHandler.setup = setup
+        try:
+            yield
+        finally:
+            server.AuthHandler.setup = original
 
     # ── tests ─────────────────────────────────────────────────────────────
 
@@ -287,22 +314,26 @@ class HandlerTest(unittest.TestCase):
         self.assertEqual(statuses.count(202), n - 1, statuses)
 
     def test_token_poll_rejects_origin_ip_mismatch(self):
-        # A completed identity is bound to the IP that started the flow. Sending
-        # an X-Forwarded-For disables the trusted-loopback exemption, so a poll
-        # from a different IP must be forbidden. (Loopback callers stay exempt,
-        # which is why the other tests, run without XFF, succeed.)
+        # A completed identity is bound to the IP that started the flow. Both
+        # shipped proxy configs *append* to X-Forwarded-For, so the header the
+        # service sees is "<whatever the client sent>, <the client's real IP>":
+        # only the rightmost element was written by our own proxy. An attacker
+        # therefore pins a leftmost value at login and replays it from a
+        # different real IP; keying on the rightmost element defeats that.
         nonce = "55555555-5555-5555-5555-555555555555"
         with self._get_with_headers(
-            f"/auth/login/github/{nonce}", {"X-Forwarded-For": "203.0.113.7"}
+            f"/auth/login/github/{nonce}",
+            {"X-Forwarded-For": "198.51.100.9, 203.0.113.7"},
         ) as r:
             state = parse_qs(urlparse(r.headers["Location"]).query)["state"][0]
         with self._get(f"/auth/callback?code=abc&state={state}") as r:
             self.assertEqual(r.status, 200)
 
         try:
+            # Same forged prefix, different real client: must not match.
             self._get_json_with_headers(
                 f"/auth/token-poll?nonce={nonce}",
-                {"X-Forwarded-For": "198.51.100.9"},
+                {"X-Forwarded-For": "198.51.100.9, 198.51.100.66"},
             )
             self.fail("expected HTTPError 403")
         except urllib.error.HTTPError as e:
@@ -310,8 +341,61 @@ class HandlerTest(unittest.TestCase):
 
         # The original origin still retrieves it once.
         status, body = self._get_json_with_headers(
-            f"/auth/token-poll?nonce={nonce}", {"X-Forwarded-For": "203.0.113.7"}
+            f"/auth/token-poll?nonce={nonce}",
+            {"X-Forwarded-For": "198.51.100.9, 203.0.113.7"},
         )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["provider_id"], "42")
+
+    def test_token_poll_rejects_x_real_ip_mismatch(self):
+        # X-Real-IP is the other header the proxies set; it is honored only when
+        # X-Forwarded-For is absent. Bind and enforce on it the same way.
+        nonce = "5a5a5a5a-5555-5555-5555-555555555555"
+        with self._get_with_headers(
+            f"/auth/login/github/{nonce}", {"X-Real-IP": "203.0.113.31"}
+        ) as r:
+            state = parse_qs(urlparse(r.headers["Location"]).query)["state"][0]
+        with self._get(f"/auth/callback?code=abc&state={state}") as r:
+            self.assertEqual(r.status, 200)
+
+        try:
+            self._get_json_with_headers(
+                f"/auth/token-poll?nonce={nonce}", {"X-Real-IP": "198.51.100.31"}
+            )
+            self.fail("expected HTTPError 403")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 403)
+
+        status, body = self._get_json_with_headers(
+            f"/auth/token-poll?nonce={nonce}", {"X-Real-IP": "203.0.113.31"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["provider_id"], "42")
+
+    def test_forwarded_header_from_a_non_loopback_peer_is_ignored(self):
+        # The recommended integration has the *game* start the flow over
+        # loopback, so the recorded origin is the constant 127.0.0.1 that every
+        # attacker knows. A remote caller must not be able to claim that origin
+        # by asserting it in a header: forwarding headers are believable only
+        # from our own proxy, which reaches us over loopback.
+        nonce = "5b5b5b5b-5555-5555-5555-555555555555"
+        with self._get(f"/auth/login/github/{nonce}") as r:  # game-style, no headers
+            state = parse_qs(urlparse(r.headers["Location"]).query)["state"][0]
+        with self._get(f"/auth/callback?code=abc&state={state}") as r:
+            self.assertEqual(r.status, 200)
+
+        with self._non_loopback_peer():
+            try:
+                self._get_json_with_headers(
+                    f"/auth/token-poll?nonce={nonce}",
+                    {"X-Forwarded-For": "127.0.0.1"},
+                )
+                self.fail("expected HTTPError 403")
+            except urllib.error.HTTPError as e:
+                self.assertEqual(e.code, 403)
+
+        # Still filed under the nonce afterwards: nothing was handed out.
+        status, body = self._get_json(f"/auth/token-poll?nonce={nonce}")
         self.assertEqual(status, 200)
         self.assertEqual(body["provider_id"], "42")
 
@@ -371,6 +455,111 @@ class BrandNameTest(unittest.TestCase):
     def test_done_page_escapes_brand(self):
         with unittest.mock.patch.dict(os.environ, {"AUTH_BRAND_NAME": "<b>x</b>"}):
             self.assertIn("&lt;b&gt;x&lt;/b&gt;", server._done_page("ok"))
+
+
+def _stub_handler(peer, *header_pairs):
+    """A handler stand-in carrying only what ``_client_ip`` reads.
+
+    ``email.message.Message`` is the same container ``BaseHTTPRequestHandler``
+    puts in ``.headers``, so case-insensitive lookup and repeated header lines
+    behave exactly as they do on a live request.
+    """
+    headers = email.message.Message()
+    for name, value in header_pairs:
+        headers[name] = value
+    return types.SimpleNamespace(
+        headers=headers, client_address=(peer, 4444) if peer else None
+    )
+
+
+class ClientIPTest(unittest.TestCase):
+    """Unit tests for the origin-IP decision that the whole binding rests on.
+
+    The end-to-end tests above cover the wiring; these pin the decision itself,
+    including the cases a live loopback-bound test server cannot produce.
+    """
+
+    def test_ignores_forwarded_headers_from_a_non_loopback_peer(self):
+        h = _stub_handler(
+            "203.0.113.99",
+            ("X-Forwarded-For", "127.0.0.1"),
+            ("X-Real-IP", "127.0.0.1"),
+        )
+        self.assertEqual(server._client_ip(h), "203.0.113.99")
+        self.assertFalse(server._is_trusted_loopback(h))
+
+    def test_takes_the_rightmost_forwarded_element_from_the_proxy(self):
+        h = _stub_handler("127.0.0.1", ("X-Forwarded-For", "198.51.100.9, 203.0.113.7"))
+        self.assertEqual(server._client_ip(h), "203.0.113.7")
+
+    def test_header_lookup_is_case_insensitive(self):
+        h = _stub_handler("127.0.0.1", ("x-forwarded-for", "9.9.9.9, 203.0.113.7"))
+        self.assertEqual(server._client_ip(h), "203.0.113.7")
+
+    def test_repeated_forwarded_header_lines_are_one_list(self):
+        # A client can send its own X-Forwarded-For line; a proxy may append a
+        # second one rather than merging. The last element of the whole list is
+        # still the hop our proxy wrote.
+        h = _stub_handler(
+            "127.0.0.1",
+            ("X-Forwarded-For", "9.9.9.9"),
+            ("X-Forwarded-For", "203.0.113.7"),
+        )
+        self.assertEqual(server._client_ip(h), "203.0.113.7")
+
+    def test_empty_forwarded_elements_are_skipped(self):
+        h = _stub_handler("127.0.0.1", ("X-Forwarded-For", " , , 203.0.113.7"))
+        self.assertEqual(server._client_ip(h), "203.0.113.7")
+        h = _stub_handler("127.0.0.1", ("X-Forwarded-For", " , , "))
+        self.assertEqual(server._client_ip(h), "127.0.0.1")
+
+    def test_ipv6_mapped_loopback_peer_is_loopback(self):
+        h = _stub_handler("::ffff:127.0.0.1", ("X-Forwarded-For", "203.0.113.7"))
+        self.assertEqual(server._client_ip(h), "203.0.113.7")
+        self.assertTrue(server._is_trusted_loopback(_stub_handler("::ffff:127.0.0.1")))
+        self.assertTrue(server._is_trusted_loopback(_stub_handler("::1")))
+
+    def test_x_real_ip_is_used_only_without_forwarded_for(self):
+        h = _stub_handler("127.0.0.1", ("X-Real-IP", "203.0.113.7"))
+        self.assertEqual(server._client_ip(h), "203.0.113.7")
+        h = _stub_handler(
+            "127.0.0.1",
+            ("X-Forwarded-For", "203.0.113.7"),
+            ("X-Real-IP", "198.51.100.9"),
+        )
+        self.assertEqual(server._client_ip(h), "203.0.113.7")
+
+    def test_bare_loopback_peer_without_headers(self):
+        h = _stub_handler("127.0.0.1")
+        self.assertEqual(server._client_ip(h), "127.0.0.1")
+        self.assertTrue(server._is_trusted_loopback(h))
+
+    def test_a_forwarded_header_forfeits_the_loopback_exemption(self):
+        # Our own proxy is on loopback, so a proxied request arrives from a
+        # loopback peer. It still represents a remote browser and must not
+        # inherit the game's exemption.
+        h = _stub_handler("127.0.0.1", ("X-Forwarded-For", "203.0.113.7"))
+        self.assertFalse(server._is_trusted_loopback(h))
+
+    def test_trusted_hop_count_selects_the_element(self):
+        h = _stub_handler(
+            "127.0.0.1", ("X-Forwarded-For", "9.9.9.9, 203.0.113.7, 10.0.0.2")
+        )
+        with unittest.mock.patch.dict(os.environ, {"AUTH_TRUSTED_PROXY_HOPS": "2"}):
+            self.assertEqual(server._client_ip(h), "203.0.113.7")
+
+    def test_hop_count_past_the_end_of_the_list_falls_back_to_the_peer(self):
+        h = _stub_handler("127.0.0.1", ("X-Forwarded-For", "9.9.9.9, 203.0.113.7"))
+        with unittest.mock.patch.dict(os.environ, {"AUTH_TRUSTED_PROXY_HOPS": "5"}):
+            self.assertEqual(server._client_ip(h), "127.0.0.1")
+
+    def test_unusable_hop_counts_fall_back_to_one(self):
+        h = _stub_handler("127.0.0.1", ("X-Forwarded-For", "9.9.9.9, 203.0.113.7"))
+        for value in ("0", "-3", "banana", ""):
+            with unittest.mock.patch.dict(
+                os.environ, {"AUTH_TRUSTED_PROXY_HOPS": value}
+            ):
+                self.assertEqual(server._client_ip(h), "203.0.113.7", value)
 
 
 if __name__ == "__main__":

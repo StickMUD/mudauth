@@ -54,6 +54,7 @@ All settings are environment variables; `--env-file` loads a `KEY=VALUE` file.
 | `AUTH_PUBLIC_BASE` | `http://localhost:7700` | Browser-facing prefix *before* `/auth/*` |
 | `AUTH_CALLBACK_URL` | `$AUTH_PUBLIC_BASE/auth/callback` | Redirect URI registered with each provider |
 | `AUTH_BRAND_NAME` | `mudauth` | Name on the "you may close this tab" page |
+| `AUTH_TRUSTED_PROXY_HOPS` | `1` | Proxies that append to `X-Forwarded-For` between the browser and the service |
 | `AUTH_USER_AGENT` | `mudauth/<version>` | Outbound User-Agent; set it to name your game |
 | `<PROVIDER>_CLIENT_ID` / `_CLIENT_SECRET` | — | Enables that provider |
 | `<PROVIDER>_CALLBACK_URL` | `$AUTH_CALLBACK_URL` | Per-provider override |
@@ -69,8 +70,11 @@ Provider registration walkthroughs: [docs/providers.md](docs/providers.md).
 Random per-flow `state` (CSRF); client-generated `nonce` with a 10-minute TTL; the
 identity is returned exactly once and forgotten; non-loopback pollers must come from
 the IP that started the flow; provider secrets never leave the service. Loopback
-callers are trusted — the listener must stay on loopback. Report vulnerabilities per
-[SECURITY.md](SECURITY.md).
+callers are trusted — the listener must stay on loopback. `X-Forwarded-For` and
+`X-Real-IP` are believed only from a loopback peer (your reverse proxy), and only
+the rightmost `X-Forwarded-For` element — the hop your proxy appended — is read, so
+a caller cannot name its own origin. If two proxies append to the header, set
+`AUTH_TRUSTED_PROXY_HOPS=2`. Report vulnerabilities per [SECURITY.md](SECURITY.md).
 
 ## Test
 

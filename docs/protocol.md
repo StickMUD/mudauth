@@ -107,6 +107,16 @@ verifies them; it has no store to keep them in.
   the identity to the same IP — except trusted loopback callers (the game itself),
   which are exempt because they connect from `127.0.0.1` or `::1`. A caller that sends
   `X-Forwarded-For` or `X-Real-IP` is never treated as loopback.
+  Those two headers are believed **only** when the immediate peer is loopback, i.e.
+  your own reverse proxy; from any other peer the socket address is used and the
+  headers are ignored. Within `X-Forwarded-For` only the rightmost element is read —
+  the hop your proxy appended — because everything left of it was written by the
+  client. Repeated header lines are read as one list. Set
+  `AUTH_TRUSTED_PROXY_HOPS=<n>` if `n` proxies append to the header before it reaches
+  the service; a header with fewer elements than that is discarded and the peer
+  address is used. Note the corollary of the recommended integration: a game that
+  starts the flow over loopback records the loopback address as the origin, so the
+  binding constrains nothing on that path — the nonce is the credential there.
 - **Confidential client only:** there is no native-capture or client-driven flow, so
   no PKCE. The `client_secret` is used server-side and never leaves the service.
 - **Secrets:** provider `client_secret`s live only in the service's environment, never
