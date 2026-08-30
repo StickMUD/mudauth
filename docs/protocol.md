@@ -121,8 +121,13 @@ verifies them; it has no store to keep them in.
   no PKCE. The `client_secret` is used server-side and never leaves the service.
 - **Secrets:** provider `client_secret`s live only in the service's environment, never
   in the game's code and never sent to clients.
-- **Logging:** query strings are redacted from the request log, because they carry live
-  credentials (`?code=`, `?nonce=`, Steam's signed assertion).
+- **Logging:** the service redacts query strings and UUIDs from its own request log,
+  because both carry live credentials (`?code=`, `?nonce=`, Steam's signed assertion,
+  and the `login_nonce` path segment of `/auth/login/<provider>/<nonce>`). Your
+  reverse proxy is a separate log: nginx's `access_log` and Apache's `CustomLog`
+  record the full request line, so those files *will* contain live nonces and
+  authorization codes for their 10-minute lifetime. Treat them as sensitive, or turn
+  access logging off for the `/auth/` location.
 - **Passwords:** if the game keeps a password flow alongside this one, it should require
   TLS for it. That is the game's concern; `mudauth` never sees a password.
 

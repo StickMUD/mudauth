@@ -190,6 +190,12 @@ _UUID_RE = re.compile(
 # Everything from a "?" to the next whitespace, for scrubbing request lines.
 _QUERY_RE = re.compile(r"\?\S*")
 
+# A UUID anywhere in a request line: the preferred login form carries the
+# login_nonce as a path segment, where the query scrub cannot reach it.
+_UUID_ANYWHERE_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.IGNORECASE
+)
+
 
 def _is_uuid(value: str) -> bool:
     return bool(_UUID_RE.match(value))
@@ -207,10 +213,11 @@ class AuthHandler(BaseHTTPRequestHandler):
 
     # Quieter logging: route through print so it lands in the service log.
     # The raw request line carries live credentials (?code=, ?nonce=, Steam's
-    # signed assertion) and is attacker-controlled, so redact query strings,
-    # escape control characters, and bound the length before logging.
+    # signed assertion, and the login_nonce in the preferred path form
+    # /auth/login/<provider>/<nonce>) and is attacker-controlled, so redact
+    # query strings and UUIDs, escape control characters, and bound the length.
     def log_message(self, fmt: str, *args) -> None:
-        line = _QUERY_RE.sub("?<redacted>", fmt % args)
+        line = _UUID_ANYWHERE_RE.sub("<redacted>", _QUERY_RE.sub("?<redacted>", fmt % args))
         print("[auth] " + line.encode("unicode_escape").decode("ascii", "replace")[:300])
 
     # ── dispatch ──────────────────────────────────────────────────────────

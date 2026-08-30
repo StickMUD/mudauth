@@ -11,6 +11,7 @@ DB-backed endpoints to test here.
 import contextlib
 import email.message
 import html
+import io
 import json
 import os
 import threading
@@ -455,6 +456,32 @@ class BrandNameTest(unittest.TestCase):
     def test_done_page_escapes_brand(self):
         with unittest.mock.patch.dict(os.environ, {"AUTH_BRAND_NAME": "<b>x</b>"}):
             self.assertIn("&lt;b&gt;x&lt;/b&gt;", server._done_page("ok"))
+
+
+class LogRedactionTest(unittest.TestCase):
+    """The request line reaches the service log; live credentials must not."""
+
+    def _log(self, request_line):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            # log_message reads nothing off the instance.
+            server.AuthHandler.log_message(None, '"%s" %s -', request_line, "200")
+        return out.getvalue()
+
+    def test_path_form_nonce_is_redacted(self):
+        nonce = "12345678-1234-1234-1234-123456789abc"
+        line = self._log(f"GET /auth/login/github/{nonce} HTTP/1.1")
+        self.assertNotIn(nonce, line)
+        self.assertIn("/auth/login/github/<redacted>", line)
+
+    def test_uppercase_nonce_is_redacted(self):
+        nonce = "12345678-1234-1234-1234-123456789ABC"
+        self.assertNotIn(nonce, self._log(f"GET /auth/login/github/{nonce} HTTP/1.1"))
+
+    def test_query_string_is_still_redacted(self):
+        line = self._log("GET /auth/callback?code=live-code&state=abc HTTP/1.1")
+        self.assertNotIn("live-code", line)
+        self.assertIn("?<redacted>", line)
 
 
 def _stub_handler(peer, *header_pairs):
