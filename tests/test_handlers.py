@@ -1362,6 +1362,32 @@ class AuthServiceTokenConfigTest(unittest.TestCase):
         finally:
             self._serve_and_close(httpd)
 
+    def test_make_server_reports_and_reuses_the_real_bound_port(self):
+        # AUTH_BIND=127.0.0.1:0 asks the OS for an ephemeral port. The
+        # startup banner and the IPv6 companion must both use the port the
+        # OS actually bound -- not the requested 0 -- or the banner lies and
+        # the companion (which exists so a browser resolving "localhost" to
+        # ::1 reaches the same service) silently binds an unrelated port of
+        # its own.
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            httpd = server.make_server("127.0.0.1", 0)
+        try:
+            real_port = httpd.server_address[1]
+            self.assertNotEqual(real_port, 0)
+            banner = out.getvalue()
+            self.assertIn(f"127.0.0.1:{real_port}", banner)
+            self.assertNotIn("127.0.0.1:0", banner)
+            companion = httpd.ipv6_companion
+            # A companion bind can fail if the OS has no free port to give
+            # the same number on ::1; only assert the match when it bound.
+            if companion is not None:
+                self.assertEqual(companion.server_address[1], real_port)
+                self.assertIn(f"[::1]:{real_port}", banner)
+                self.assertNotIn("[::1]:0", banner)
+        finally:
+            self._serve_and_close(httpd)
+
 
 class StdoutFlushTest(unittest.TestCase):
     """The production defect: Python block-buffers stdout when it is not a

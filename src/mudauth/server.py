@@ -815,6 +815,12 @@ def make_server(host: str, port: int) -> ThreadingHTTPServer:
     AuthHandler.flow = flow
 
     httpd = ThreadingHTTPServer((host, port), AuthHandler)
+    # The port actually bound -- not the requested `port`, which is 0 on an
+    # ephemeral bind (AUTH_BIND=127.0.0.1:0). Everything below must report
+    # and reuse this, or an ephemeral bind gets a banner that names the wrong
+    # port and an IPv6 companion that binds an unrelated random port of its
+    # own instead of matching the primary listener.
+    bound_port = httpd.server_address[1]
 
     # When bound to IPv4 loopback, also cover IPv6 loopback so browsers that
     # prefer ::1 for "localhost" can still reach the login/callback endpoints.
@@ -822,7 +828,7 @@ def make_server(host: str, port: int) -> ThreadingHTTPServer:
     # alongside the primary server instead of leaking its socket and thread.
     httpd.ipv6_companion = None
     if host in ("127.0.0.1", "localhost"):
-        httpd.ipv6_companion = _start_ipv6_loopback_companion(port)
+        httpd.ipv6_companion = _start_ipv6_loopback_companion(bound_port)
 
     def _janitor() -> None:
         while True:
@@ -840,7 +846,7 @@ def make_server(host: str, port: int) -> ThreadingHTTPServer:
             "this gap; see docs/deploy.md for the migration order."
         )
     _log(
-        f"[auth] mudauth {__version__} on {host}:{port} — "
+        f"[auth] mudauth {__version__} on {host}:{bound_port} — "
         f"providers: {sorted(configs.keys()) or '(none configured)'} — "
         f"trusted proxy hops: {hops} — "
         f"auth service token: {'configured' if token else 'NOT SET'}"
