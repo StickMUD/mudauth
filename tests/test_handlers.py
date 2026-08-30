@@ -96,6 +96,15 @@ class HandlerTest(unittest.TestCase):
         with _opener().open(req) as r:
             return r.status, json.loads(r.read().decode())
 
+    def _post_json_with_headers(self, path, payload, headers):
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            self.base + path, data=data,
+            headers={"Content-Type": "application/json", **headers}, method="POST",
+        )
+        with _opener().open(req) as r:
+            return r.status, json.loads(r.read().decode())
+
     def _get_with_headers(self, path, headers):
         req = urllib.request.Request(self.base + path, headers=headers, method="GET")
         return _opener().open(req)
@@ -406,6 +415,80 @@ class HandlerTest(unittest.TestCase):
         status, body = self._post_json("/auth/login-cancel", {"nonce": nonce})
         self.assertEqual(status, 200)
         self.assertGreaterEqual(body["cancelled"], 1)
+
+    def test_login_cancel_rejects_origin_ip_mismatch(self):
+        # Cancelling drops a completed identity, so it is bound to the same
+        # origin as the poll: a stranger must not be able to wipe a login that
+        # is on its way to somebody else's client.
+        nonce = "3a3a3a3a-3333-3333-3333-333333333333"
+        with self._get_with_headers(
+            f"/auth/login/github/{nonce}", {"X-Forwarded-For": "203.0.113.7"}
+        ) as r:
+            state = parse_qs(urlparse(r.headers["Location"]).query)["state"][0]
+        with self._get(f"/auth/callback?code=abc&state={state}") as r:
+            self.assertEqual(r.status, 200)
+
+        try:
+            self._post_json_with_headers(
+                "/auth/login-cancel", {"nonce": nonce},
+                {"X-Forwarded-For": "198.51.100.9"},
+            )
+            self.fail("expected HTTPError 403")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 403)
+            self.assertEqual(json.loads(e.read().decode())["error"], "forbidden")
+
+        # The identity survived the rejected cancel.
+        status, _ = self._get_json_with_headers(
+            f"/auth/token-poll?nonce={nonce}", {"X-Forwarded-For": "203.0.113.7"}
+        )
+        self.assertEqual(status, 200)
+
+    def test_login_with_a_malformed_nonce_is_400(self):
+        try:
+            self._get("/auth/login/github/not-a-uuid")
+            self.fail("expected HTTPError 400")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 400)
+            self.assertIn("Invalid login_nonce format.", e.read().decode())
+
+    def test_profile_fetch_failure_is_502(self):
+        stub = providers.fetch_provider_user
+        providers.fetch_provider_user = lambda p, c, t: None
+        self.addCleanup(setattr, providers, "fetch_provider_user", stub)
+
+        nonce = "6a6a6a6a-6666-6666-6666-666666666666"
+        with self._get(f"/auth/login/github/{nonce}") as r:
+            state = parse_qs(urlparse(r.headers["Location"]).query)["state"][0]
+        try:
+            self._get(f"/auth/callback?code=abc&state={state}")
+            self.fail("expected HTTPError 502")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 502)
+            self.assertIn("profile", e.read().decode())
+
+        # Nothing was filed under the nonce.
+        status, _ = self._get_json(f"/auth/token-poll?nonce={nonce}")
+        self.assertEqual(status, 202)
+
+    def test_callback_for_a_deconfigured_provider_is_503(self):
+        # The flow started while github was configured; the process comes back
+        # with a different environment before the browser returns.
+        nonce = "6b6b6b6b-6666-6666-6666-666666666666"
+        with self._get(f"/auth/login/github/{nonce}") as r:
+            state = parse_qs(urlparse(r.headers["Location"]).query)["state"][0]
+
+        configs = server.AuthHandler.configs
+        self.addCleanup(setattr, server.AuthHandler, "configs", configs)
+        server.AuthHandler.configs = {
+            k: v for k, v in configs.items() if k != "github"
+        }
+        try:
+            self._get(f"/auth/callback?code=abc&state={state}")
+            self.fail("expected HTTPError 503")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 503)
+            self.assertIn("no longer configured", e.read().decode())
 
     def test_removed_endpoints_are_404(self):
         for path in ("/auth/identity?token=x", "/auth/account-identities?account_id=x"):
