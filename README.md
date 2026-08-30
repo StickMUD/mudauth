@@ -97,10 +97,12 @@ That "loopback caller" test is itself worth strengthening: by default it rests o
 *absence* of `X-Forwarded-For`/`X-Real-IP`, which a proxy that stops adding them (a
 misconfiguration, not an attack) can erase for every internet caller at once. Set
 `AUTH_SERVICE_TOKEN` to the same value in the service's environment and the game's, and
-the exemption instead requires a loopback peer **and** a matching `X-Auth-Service-Token`
-header. Unset is a supported, backward-compatible default — the service warns at startup
-— but see [docs/deploy.md](docs/deploy.md) for the order to turn it on without taking
-logins down.
+the exemption instead requires a loopback peer, a matching `X-Auth-Service-Token`
+header, **and** that same header absence — the token tightens the legacy rule, it does
+not replace it, so a caller who learns the token still cannot claim the exemption
+through the proxy. Unset is a supported, backward-compatible default — the service warns
+at startup — but see [docs/deploy.md](docs/deploy.md) for the order to turn it on without
+taking logins down.
 
 Both shipped proxy configs turn access logging off for `/auth/`, because the request
 line carries the nonce and the authorization code. Report vulnerabilities per

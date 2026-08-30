@@ -42,10 +42,20 @@ def _is_local_host(host: str) -> bool:
 
 
 def _bind_host_port() -> tuple[str, int]:
-    """Host and port the listener binds, from AUTH_BIND."""
+    """Host and port the listener binds, from AUTH_BIND.
+
+    Raises ``ValueError`` on an unparseable port, with a message clear enough
+    to print as-is -- the same "configuration error" treatment as a bad hop
+    count, rather than an uncaught exception and a raw traceback.
+    """
     bind = os.environ.get("AUTH_BIND", "127.0.0.1:7700")
     host, _, port_s = bind.rpartition(":")
-    return host or "127.0.0.1", int(port_s or "7700")
+    port_s = port_s or "7700"
+    try:
+        port = int(port_s)
+    except ValueError:
+        raise ValueError(f"AUTH_BIND port must be a number, not {port_s!r}") from None
+    return host or "127.0.0.1", port
 
 
 def build_server_from_env():
@@ -75,7 +85,12 @@ def _service_url() -> str:
     override = os.environ.get("AUTH_SERVICE_URL")
     if override:
         return override.rstrip("/")
-    host, port = _bind_host_port()
+    try:
+        host, port = _bind_host_port()
+    except ValueError:
+        # check() has already reported this; fall back to the documented
+        # default rather than raising a second time on the same bad value.
+        return "http://127.0.0.1:7700"
     return f"http://{host}:{port}"
 
 
@@ -96,10 +111,16 @@ def check(args: argparse.Namespace) -> int:
         else:
             print("  WARNING: not https — the login URL and the provider redirect would cross the network in the clear")
         problems += 1
-    host, port = _bind_host_port()
-    print(f"AUTH_BIND: {host}:{port}")
-    if not _is_local_host(host):
-        print("  WARNING: not a loopback address — this listener has no authentication of its own and must not be reachable off-box; bind 127.0.0.1 and let your reverse proxy front it")
+    # `serve` refuses to start on an unparseable AUTH_BIND port, so `check`
+    # has to say so too rather than crashing on the same bad value.
+    try:
+        host, port = _bind_host_port()
+        print(f"AUTH_BIND: {host}:{port}")
+        if not _is_local_host(host):
+            print("  WARNING: not a loopback address — this listener has no authentication of its own and must not be reachable off-box; bind 127.0.0.1 and let your reverse proxy front it")
+            problems += 1
+    except ValueError as exc:
+        print(f"AUTH_BIND: ERROR: {exc}; `mudauth serve` will refuse to start")
         problems += 1
     # `serve` refuses to start on a bad hop count, so `check` has to say so
     # too rather than reporting a configuration that will not come up.

@@ -82,6 +82,26 @@ class ClientTest(unittest.TestCase):
             r = client.request("GET", "/x", base_url=self.base)
         self.assertIsNone(json.loads(r["body"])["token"])
 
+    def test_a_token_containing_a_newline_is_never_sent_or_logged(self):
+        # http.client.putheader raises ValueError("Invalid header value %r" %
+        # value) on a header containing \n/\r, embedding the whole value --
+        # and the request must still complete (with the header simply
+        # omitted) rather than raising that exception up to the caller.
+        with (
+            unittest.mock.patch.dict(os.environ, {"AUTH_SERVICE_TOKEN": "sekrit\nX-Evil: 1"}),
+            self.assertLogs(client._logger, level="WARNING") as logs,
+        ):
+            r = client.request("GET", "/x", base_url=self.base)
+        self.assertEqual(r["status"], 200)
+        self.assertIsNone(json.loads(r["body"])["token"])
+        self.assertTrue(any("sekrit" not in line for line in logs.output))
+        self.assertFalse(any("sekrit" in line for line in logs.output))
+
+    def test_a_token_with_leading_or_trailing_whitespace_is_stripped(self):
+        with unittest.mock.patch.dict(os.environ, {"AUTH_SERVICE_TOKEN": "  s3cr3t  \n"}):
+            r = client.request("GET", "/x", base_url=self.base)
+        self.assertEqual(json.loads(r["body"])["token"], "s3cr3t")
+
     def test_token_is_resolved_at_call_time_not_import_time(self):
         # Set the env var only after the module has already been imported
         # (it was, at the top of this file), then change it between two

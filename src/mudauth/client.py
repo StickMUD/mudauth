@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import urllib.error
 import urllib.request
 
@@ -24,6 +25,12 @@ DEFAULT_BASE_URL = os.environ.get("AUTH_SERVICE_URL", "http://127.0.0.1:7700")
 # server.py's _is_trusted_loopback). Must match server.py's
 # AUTH_SERVICE_TOKEN_HEADER.
 AUTH_SERVICE_TOKEN_HEADER = "X-Auth-Service-Token"
+
+# secrets.token_urlsafe (the generator the docs recommend) only ever emits
+# this charset. Anything else -- notably a stray \n or \r from a copy-paste
+# into .env -- is not a token this client should send: putheader() would
+# reject it anyway, and its ValueError embeds the whole value.
+_SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 _logger = logging.getLogger(__name__)
 
@@ -53,9 +60,16 @@ def request(
     # Read at call time, not at import, so a test can set/unset it around a
     # single request and so an operator does not need a specific process
     # start order for this module vs. the environment.
-    token = os.environ.get("AUTH_SERVICE_TOKEN")
+    token = (os.environ.get("AUTH_SERVICE_TOKEN") or "").strip()
     if token:
-        headers[AUTH_SERVICE_TOKEN_HEADER] = token
+        if _SAFE_TOKEN_RE.match(token):
+            headers[AUTH_SERVICE_TOKEN_HEADER] = token
+        else:
+            _logger.warning(
+                "AUTH_SERVICE_TOKEN contains characters outside a token's "
+                "expected charset; omitting %s on this request",
+                AUTH_SERVICE_TOKEN_HEADER,
+            )
     if method == "POST":
         data = (body or "{}").encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -67,6 +81,14 @@ def request(
     except urllib.error.HTTPError as exc:
         text = exc.read().decode("utf-8", "replace") if exc.fp else ""
         return {"status": exc.code, "body": text}
+    except ValueError as exc:
+        # http.client.putheader raises ValueError("Invalid header value %r" %
+        # value) on a header it rejects, embedding the whole value -- which
+        # could be the token itself despite the charset check above (e.g.
+        # some other header). Log only the exception type, not its text, so a
+        # rejected header value never reaches the log.
+        _logger.warning("mudauth client %s %s failed: %s", method, path, type(exc).__name__)
+        return {"status": 0, "body": type(exc).__name__}
     except Exception as exc:  # noqa: BLE001 — transport failure of any kind
         _logger.warning("mudauth client %s %s failed: %s", method, path, exc)
         return {"status": 0, "body": str(exc)}

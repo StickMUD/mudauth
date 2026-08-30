@@ -28,5 +28,10 @@ rests on the *absence* of forwarding headers, which is evidence of absence, not
 evidence of presence: a proxy that stops adding them makes every internet request
 indistinguishable from the game. Set `AUTH_SERVICE_TOKEN` (the same value in the
 service's environment and the game's) to close that gap with a shared secret,
-checked with `hmac.compare_digest` and never logged. See docs/deploy.md for the
-migration order that avoids taking logins down when you turn it on.
+required alongside a loopback peer *and* the same absence of forwarding headers
+-- the token alone does not grant the exemption, since neither shipped proxy
+config lets a client-supplied copy of the header through, but the service does
+not rely on the proxy for that; see docs/protocol.md#security for why. The
+service never logs the token, on any path; the value is checked with
+`hmac.compare_digest`. See docs/deploy.md for the migration order that avoids
+taking logins down when you turn it on.

@@ -130,6 +130,13 @@ class ServeTest(unittest.TestCase):
         finally:
             httpd.shutdown()
             httpd.server_close()
+            # A 127.0.0.1 bind also starts an IPv6 [::1] companion server
+            # (server.make_server stashes it as httpd.ipv6_companion);
+            # leaving that running leaks its socket and daemon thread.
+            companion = getattr(httpd, "ipv6_companion", None)
+            if companion is not None:
+                companion.shutdown()
+                companion.server_close()
 
 
 class VersionTest(unittest.TestCase):

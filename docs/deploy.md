@@ -85,6 +85,18 @@ your game is already sending it.
 
 ## 3. Install the systemd unit
 
+**Before any restart of an already-running service** (this first install
+included, but especially a later upgrade): `AUTH_TRUSTED_PROXY_HOPS` is
+validated at startup and refuses to come up on a value that previously
+clamped silently -- `0`, a negative number, or anything that is not a whole
+number. Confirm `/etc/mudauth/.env` either **omits** the variable (the
+default of `1` applies) or sets it to a **whole number ≥ 1** before you
+restart. Skipping this check is not fatal -- the service exits cleanly with
+`configuration error: ...` rather than serving with a degraded origin
+binding -- but the restart is then not "safe to assume worked"; always watch
+the next two commands for that message rather than just running
+`enable --now` and moving on.
+
 ```bash
 sudo cp deploy/mudauth.service /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -92,6 +104,10 @@ sudo systemctl enable --now mudauth
 systemctl status mudauth
 journalctl -u mudauth -f
 ```
+
+`systemctl status mudauth` reports `failed` with a `configuration error` line
+under `Main PID` when this happens; `journalctl -u mudauth` carries the same
+message the service printed to stderr, naming the offending variable.
 
 > The shipped unit runs `ExecStart=/home/mudauth/.local/bin/mudauth serve`, which is
 > where `pipx`/`pip --user` put the entry point for a home under `/home`. It sets
@@ -149,6 +165,7 @@ ProxyPreserveHost On
 RequestHeader set X-Forwarded-Proto "https"
 RequestHeader set X-Real-IP "%{REMOTE_ADDR}s"
 ProxyAddHeaders On
+RequestHeader unset X-Auth-Service-Token
 
 ProxyPass        /auth/ http://127.0.0.1:7700/auth/
 ProxyPassReverse /auth/ http://127.0.0.1:7700/auth/
@@ -160,7 +177,11 @@ hardening — would strip the forwarding headers, and every internet request wou
 reach the service from `127.0.0.1` with nothing to distinguish it from the game's own
 loopback calls: origin binding would be skipped entirely. The explicit `X-Real-IP` line
 pins the other header the service reads rather than leaving it to an implicit default,
-and overwrites any `X-Real-IP` the client sent.
+and overwrites any `X-Real-IP` the client sent. `RequestHeader unset X-Auth-Service-Token`
+strips whatever a client sent in that header, the same way the explicit `X-Real-IP` line
+overwrites a client-supplied one: without it, `mod_proxy` forwards an unrecognized client
+header unchanged, and a caller who has learned `AUTH_SERVICE_TOKEN` could present it
+through this proxy and claim the game's loopback exemption remotely.
 
 Also suppress access logging for these requests. The request line carries the
 `login_nonce`, `?code=` and Steam's signed assertion, so this vhost's `CustomLog` would
@@ -213,9 +234,13 @@ the log to say so.
 `AUTH_SERVICE_TOKEN` closes that gap by identifying the game with something only it
 can present: a shared secret, sent as `X-Auth-Service-Token` on every request the
 client makes, checked with `hmac.compare_digest`. Once the service is configured
-with a token, the exemption requires **both** a loopback peer **and** a matching
-token — absence of forwarding headers is no longer enough on its own. A valid token
-from a non-loopback peer is still refused; both are required, defense in depth.
+with a token, the exemption requires a loopback peer, a matching token, **and**
+that same absence of forwarding headers — the token tightens the rule, it does not
+replace it. Both shipped proxy configs also strip a client-supplied copy of this
+header before proxying, but the service does not rely on that alone: the check
+reads the request directly, so even a hand-rolled vhost that forgot to strip it
+still cannot hand the exemption to a caller arriving through the proxy. A valid
+token from a non-loopback peer is still refused regardless, defense in depth.
 
 **The service must not start requiring the token before the game is sending it.**
 Getting the order backwards (service restarted first) is what takes logins down:
@@ -289,7 +314,7 @@ usable from a monitoring script.
 | Symptom | Check |
 |---------|-------|
 | Logins hang/time out right after setting `AUTH_SERVICE_TOKEN` | The service was restarted before the game, or the two `AUTH_SERVICE_TOKEN` values don't match. See step 5's migration order; the immediate fix is to unset (or correct) the token in the service's `.env` and restart the service again. |
-| `[auth][security] ... loopback exemption denied` in the service log | A loopback caller — normally the game — presented a missing or wrong token. If this is the game itself, its `AUTH_SERVICE_TOKEN` does not match the service's; if it isn't, treat it as a genuine local probe worth investigating. |
+| `[auth][security] ... loopback exemption denied` in the service log | A loopback caller presented a missing or wrong token *and no forwarding header* — an ordinary browser request always carries one via your reverse proxy, so this line does not fire for those; it fires only for something calling the service directly, on-box. If this is the game itself, its `AUTH_SERVICE_TOKEN` does not match the service's; if it isn't, treat it as a genuine local probe worth investigating. |
 
 In game, the provider list should now offer your configured providers. Until then
 the flow falls back to whatever login your game does with no providers configured.

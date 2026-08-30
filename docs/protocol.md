@@ -132,14 +132,30 @@ verifies them; it has no store to keep them in.
   from `127.0.0.1` with no forwarding header, indistinguishable from the game, and the
   origin check would be skipped entirely with nothing in the log to say so. Setting
   `AUTH_SERVICE_TOKEN` (the same value in the service's environment and the game's)
-  replaces that with positive evidence: the exemption requires a loopback peer **and**
-  a matching token in `X-Auth-Service-Token`, compared with `hmac.compare_digest` since
-  it is a bearer credential. A valid token from a non-loopback peer is still refused —
-  both are required, defense in depth. Unset, the legacy header-absence rule stands
-  exactly as above, so an existing deployment does not break on restart; the service
-  prints a startup warning recommending the token be set. The token is never logged,
-  on any path. See [deploy.md](deploy.md) for the required migration order — the
-  service must not start requiring the token before the game is sending it.
+  replaces that with positive evidence: the exemption requires a loopback peer, a
+  matching token in `X-Auth-Service-Token` compared with `hmac.compare_digest` since it
+  is a bearer credential, **and** the absence of a forwarding header. That third
+  condition is load-bearing: the shipped nginx and Apache configs both strip a
+  client-supplied `X-Auth-Service-Token` before proxying, but the service does not rely
+  on the proxy alone to enforce that — the check reads the request directly, so a
+  hand-rolled vhost that omitted the strip still cannot grant the exemption to a caller
+  arriving through it. Without this, the token alone would have been a net *widening* of
+  remote attack surface: a caller who learned the token (from a paste, a log,
+  `/proc/<pid>/environ` under the same uid) could present it *through* the proxy and
+  inherit the exemption remotely, which the legacy header-absence rule never permitted —
+  a correctly configured proxy always appends `X-Forwarded-For`. Requiring all three
+  makes the token path a strict tightening of the legacy rule, never a trade against it:
+  the game polls over loopback directly and never carries a forwarding header, so this
+  costs it nothing. A valid token from a non-loopback peer is still refused regardless —
+  a loopback peer and the token are both required on top of the header check, defense in
+  depth. Unset, the legacy header-absence rule stands exactly as above, so an existing
+  deployment does not break on restart; the service prints a startup warning recommending
+  the token be set. The service itself never logs the token, on any path; the
+  `mudauth.client` module that sends it validates the value's charset before adding the
+  header and, if the underlying HTTP layer ever rejects a header value, logs only the
+  exception type rather than its text, so a malformed token cannot reach the game's log
+  either. See [deploy.md](deploy.md) for the required migration order — the service must
+  not start requiring the token before the game is sending it.
 - **Confidential client only:** there is no native-capture or client-driven flow, so
   no PKCE. The `client_secret` is used server-side and never leaves the service.
 - **Secrets:** provider `client_secret`s live only in the service's environment, never
@@ -254,7 +270,7 @@ Body: `{"nonce":"<uuid>"}`, `Content-Type: application/json`. Bodies larger than
 |--------|------|---------|
 | 200 | `{"cancelled":<n>}` | `n` is the number of entries dropped: the completed identity if one was filed, plus every in-flight state carrying this nonce. `0` is a normal answer for an unknown nonce. |
 | 400 | `{"error":"invalid nonce"}` | `nonce` missing, not a string, or not a UUID |
-| 403 | `{"error":"forbidden"}` | A completed identity exists under this nonce and the caller's IP differs from the one that started the flow, and the caller is not trusted loopback |
+| 403 | `{"error":"forbidden"}` | A completed identity or a still-pending flow exists under this nonce, the caller is not trusted loopback, and the caller's IP differs from (or cannot be resolved to match) the one that started the flow |
 
 ### `GET /auth/healthz`
 
