@@ -9,6 +9,11 @@ StartLimitBurst=5
 Type=simple
 User=mudauth
 Group=mudauth
+# PYTHONUNBUFFERED: stdout is block-buffered when not a TTY (always true
+# here), so without this a diagnostic can sit unflushed in the journal for a
+# long time. server.py now flushes every print() itself; this is belt and
+# braces for anyone launching it a different way.
+Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=/etc/mudauth/.env
 ExecStart=/home/mudauth/.local/bin/mudauth serve
 Restart=on-failure

@@ -14,6 +14,9 @@ import html
 import io
 import json
 import os
+import select
+import subprocess
+import sys
 import threading
 import time
 import types
@@ -1302,6 +1305,57 @@ class AuthServiceTokenConfigTest(unittest.TestCase):
             self.assertNotIn("s3cr3t", out.getvalue())
         finally:
             self._serve_and_close(httpd)
+
+
+class StdoutFlushTest(unittest.TestCase):
+    """The production defect: Python block-buffers stdout when it is not a
+    TTY -- always true under systemd -- so a print() without flush=True can
+    sit unheard in that buffer indefinitely, including the [auth][security]
+    lines an operator needs live during an incident. This launches the real
+    service the way the shipped unit does (``mudauth serve``, via
+    ``python -m mudauth.cli serve`` so it runs under this interpreter) with
+    stdout attached to a pipe (never a TTY) and PYTHONUNBUFFERED explicitly
+    removed from the environment, so neither the test harness's TTY nor the
+    operator's workaround can mask a regression. The startup banner is the
+    smallest possible amount of output -- nothing close to a 4 KB
+    block-buffer's worth -- so without flush=True it would not arrive on the
+    pipe within the timeout below; it would sit until the process exited or
+    enough later output filled the buffer.
+    """
+
+    def test_startup_banner_arrives_promptly_on_a_piped_stdout(self):
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env = os.environ.copy()
+        env.pop("PYTHONUNBUFFERED", None)
+        env["AUTH_BIND"] = "127.0.0.1:0"  # ephemeral port; avoid colliding with a real instance
+        # A context manager, not a bare Popen(): its __exit__ closes the
+        # piped stdout/stderr file objects, which a bare Popen() call leaves
+        # open (and unclosed pipes are exactly what -W error::ResourceWarning
+        # is there to catch).
+        with subprocess.Popen(
+            [sys.executable, "-m", "mudauth.cli", "serve"],
+            cwd=repo_root,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        ) as proc:
+            try:
+                ready, _, _ = select.select([proc.stdout], [], [], 3)
+                self.assertTrue(
+                    ready,
+                    "no output arrived on the piped stdout within 3s -- diagnostics "
+                    "are sitting unflushed in the block buffer",
+                )
+                line = proc.stdout.readline()
+                self.assertIn("[auth]", line)
+            finally:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
 
 
 if __name__ == "__main__":

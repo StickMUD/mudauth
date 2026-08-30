@@ -97,6 +97,23 @@ def brand_name() -> str:
     return os.environ.get("AUTH_BRAND_NAME") or "mudauth"
 
 
+# ── Diagnostics ───────────────────────────────────────────────────────────────
+
+
+def _log(msg: str) -> None:
+    """Print one diagnostic line to stdout, flushed immediately.
+
+    Python block-buffers stdout when it is not a TTY -- always true under
+    systemd -- so an unflushed print() can sit in a multi-KB buffer long
+    after the event it describes, including the [auth][security] lines an
+    operator needs live during an incident. Every stdout diagnostic in this
+    module goes through here so log ordering and promptness never depend on
+    how the process was launched. The unit file also sets PYTHONUNBUFFERED=1
+    as a second line of defense; this makes correctness not depend on it.
+    """
+    print(msg, flush=True)
+
+
 PENDING_TTL = 10 * 60  # seconds
 
 
@@ -234,7 +251,7 @@ def _client_ip(handler: BaseHTTPRequestHandler) -> str | None:
     if parts:
         hops = _trusted_proxy_hops()
         if hops > len(parts):
-            print(
+            _log(
                 "[auth][security] forwarded chain is shorter than "
                 f"AUTH_TRUSTED_PROXY_HOPS={hops}: {len(parts)} element(s) via peer "
                 f"{peer}; refusing rather than falling back to the peer address"
@@ -242,7 +259,7 @@ def _client_ip(handler: BaseHTTPRequestHandler) -> str | None:
             return None
         claimed = parts[-hops]
         if not _is_ip_address(claimed):
-            print(
+            _log(
                 f"[auth][security] X-Forwarded-For hop {hops} is not an IP address: "
                 f"{claimed[:64]!r} via peer {peer}; refusing"
             )
@@ -255,7 +272,7 @@ def _client_ip(handler: BaseHTTPRequestHandler) -> str | None:
     if real_lines:
         claimed = real_lines[-1].strip()
         if not _is_ip_address(claimed):
-            print(
+            _log(
                 f"[auth][security] X-Real-IP is not an IP address: {claimed[:64]!r} "
                 f"via peer {peer}; refusing"
             )
@@ -352,7 +369,7 @@ def _log_rejected_exemption(
     conventions as the origin-mismatch logging below -- peer, claimed origin,
     recorded origin, provider -- and never the credential itself.
     """
-    print(
+    _log(
         f"[auth][security] {endpoint}: loopback exemption denied (missing or "
         f"invalid {AUTH_SERVICE_TOKEN_HEADER}) — peer={peer} claimed={claimed} "
         f"recorded={recorded} provider={provider}"
@@ -376,7 +393,7 @@ class AuthHandler(BaseHTTPRequestHandler):
     # query strings and UUIDs, escape control characters, and bound the length.
     def log_message(self, fmt: str, *args) -> None:
         line = _UUID_ANYWHERE_RE.sub("<redacted>", _QUERY_RE.sub("?<redacted>", fmt % args))
-        print("[auth] " + line.encode("unicode_escape").decode("ascii", "replace")[:300])
+        _log("[auth] " + line.encode("unicode_escape").decode("ascii", "replace")[:300])
 
     # ── dispatch ──────────────────────────────────────────────────────────
 
@@ -516,20 +533,20 @@ class AuthHandler(BaseHTTPRequestHandler):
         if not state or pending is None:
             # The user-facing message stays generic, but log the specific cause
             # so an operator can tell a forged/replayed state from other 400s.
-            print("[auth] callback: unknown or already-consumed state")
+            _log("[auth] callback: unknown or already-consumed state")
             self._html(400, _AUTH_FAILED_MESSAGE)
             return
         # Enforce the TTL inline so expiry is exact and does not depend on the
         # 60s janitor sweep having run between creation and callback.
         if time.time() - pending["created_at"] > PENDING_TTL:
-            print(f"[auth] {pending['provider']} callback: login state expired (TTL)")
+            _log(f"[auth] {pending['provider']} callback: login state expired (TTL)")
             self._html(400, _AUTH_FAILED_MESSAGE)
             return
 
         provider = pending["provider"]
         cfg = self.configs.get(provider)
         if not cfg:
-            print(f"[auth] {provider} callback: provider no longer configured")
+            _log(f"[auth] {provider} callback: provider no longer configured")
             self._html(503, f"Provider '{html.escape(provider)}' is no longer configured.")
             return
 
@@ -537,7 +554,7 @@ class AuthHandler(BaseHTTPRequestHandler):
             # OpenID 2.0: no code exchange; verify the signed assertion and
             # carry the steamid64 into the profile step.
             if q.get("openid.mode", [""])[0] == "cancel":
-                print("[auth] steam callback: user cancelled at Steam")
+                _log("[auth] steam callback: user cancelled at Steam")
                 self._html(400, _DECLINED_MESSAGE)
                 return
             access = providers.verify_steam_assertion(q, cfg)
@@ -549,7 +566,7 @@ class AuthHandler(BaseHTTPRequestHandler):
                 # Both values arrive on the query string, so bound and repr
                 # them like the other attacker-reachable log inputs.
                 desc = q.get("error_description", [""])[0]
-                print(
+                _log(
                     f"[auth] {provider} callback error: "
                     f"{repr(error)[:100]}: {repr(desc)[:200]}"
                 )
@@ -560,7 +577,7 @@ class AuthHandler(BaseHTTPRequestHandler):
                 return
             code = q.get("code", [""])[0]
             if not code:
-                print(f"[auth] {provider} callback missing the code param")
+                _log(f"[auth] {provider} callback missing the code param")
                 self._html(400, _AUTH_FAILED_MESSAGE)
                 return
             access = providers.exchange_code_for_token(provider, cfg, code)
@@ -623,7 +640,7 @@ class AuthHandler(BaseHTTPRequestHandler):
                 if not recorded or not claimed or claimed != recorded:
                     # A cross-IP retrieval is a hijack signal worth a trace,
                     # and a trace is only useful with the addresses in it.
-                    print(
+                    _log(
                         "[auth][security] token-poll: origin rejected — "
                         f"peer={peer} claimed={claimed} recorded={recorded} "
                         f"provider={entry.get('provider')}"
@@ -677,7 +694,7 @@ class AuthHandler(BaseHTTPRequestHandler):
                 if not loopback and (
                     not recorded or not requester_ip or requester_ip != recorded
                 ):
-                    print(
+                    _log(
                         "[auth][security] login-cancel: origin rejected — "
                         f"peer={peer} claimed={requester_ip} recorded={recorded} "
                         f"provider={provider}"
@@ -742,10 +759,10 @@ def _start_ipv6_loopback_companion(port: int) -> ThreadingHTTPServer | None:
     try:
         comp = _ThreadingHTTPServer6(("::1", port), AuthHandler)
     except OSError as exc:
-        print(f"[auth] IPv6 loopback companion not started: {exc}")
+        _log(f"[auth] IPv6 loopback companion not started: {exc}")
         return None
     threading.Thread(target=comp.serve_forever, daemon=True).start()
-    print(f"[auth] also listening on [::1]:{port} (IPv6 loopback)")
+    _log(f"[auth] also listening on [::1]:{port} (IPv6 loopback)")
     return comp
 
 
@@ -778,7 +795,7 @@ def make_server(host: str, port: int) -> ThreadingHTTPServer:
 
     threading.Thread(target=_janitor, daemon=True).start()
     if not token:
-        print(
+        _log(
             "[auth] AUTH_SERVICE_TOKEN is not set — the game is identified only "
             "by loopback peer + absent forwarding headers. If the reverse proxy "
             "ever stops adding those headers, every internet request looks like "
@@ -786,7 +803,7 @@ def make_server(host: str, port: int) -> ThreadingHTTPServer:
             "AUTH_SERVICE_TOKEN here and in the game's environment to close "
             "this gap; see docs/deploy.md for the migration order."
         )
-    print(
+    _log(
         f"[auth] mudauth {__version__} on {host}:{port} — "
         f"providers: {sorted(configs.keys()) or '(none configured)'} — "
         f"trusted proxy hops: {hops} — "

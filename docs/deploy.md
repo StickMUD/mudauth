@@ -109,6 +109,15 @@ journalctl -u mudauth -f
 under `Main PID` when this happens; `journalctl -u mudauth` carries the same
 message the service printed to stderr, naming the offending variable.
 
+The shipped unit sets `Environment=PYTHONUNBUFFERED=1`, so the journal
+reflects reality promptly: Python block-buffers stdout when it is not a TTY
+(always true under systemd), so without this, diagnostics — including the
+`[auth][security]` lines — can sit unflushed for a long time before a burst
+of writes flushes the buffer all at once, misleading anyone reading the
+journal live during an incident. `server.py` also flushes every `print()`
+itself, so this is belt and braces; if you write your own unit instead of
+using the shipped one, set `PYTHONUNBUFFERED=1` there too.
+
 > The shipped unit runs `ExecStart=/home/mudauth/.local/bin/mudauth serve`, which is
 > where `pipx`/`pip --user` put the entry point for a home under `/home`. It sets
 > `ProtectHome=read-only` so systemd can still execute it; if you installed
