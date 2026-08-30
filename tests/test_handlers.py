@@ -425,6 +425,27 @@ class HandlerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["provider_id"], "42")
 
+    def test_browser_login_is_still_pollable_by_the_headerless_mud(self):
+        # The live path a game uses: the player's browser starts the flow
+        # through the reverse proxy (origin recorded as the real client IP),
+        # and the game polls over loopback with no forwarding headers. That
+        # poll is exempt from the binding and must still retrieve the identity.
+        nonce = "5c5c5c5c-5555-5555-5555-555555555555"
+        with self._get_with_headers(
+            f"/auth/login/github/{nonce}",
+            {"X-Forwarded-For": "198.51.100.9, 203.0.113.7"},
+        ) as r:
+            state = parse_qs(urlparse(r.headers["Location"]).query)["state"][0]
+        with self._get_with_headers(
+            f"/auth/callback?code=abc&state={state}",
+            {"X-Forwarded-For": "198.51.100.9, 203.0.113.7"},
+        ) as r:
+            self.assertEqual(r.status, 200)
+
+        status, body = self._get_json(f"/auth/token-poll?nonce={nonce}")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["provider_id"], "42")
+
     def test_poll_of_an_entry_with_no_recorded_origin_is_rejected(self):
         # A falsy origin used to short-circuit the whole comparison, so the
         # identity went to whoever held the nonce. An origin we cannot vouch
@@ -529,12 +550,14 @@ class HandlerTest(unittest.TestCase):
         with self._get("/auth/providers") as r:  # JSON path
             self.assertEqual(r.headers["X-Content-Type-Options"], "nosniff")
             self.assertEqual(r.headers["Referrer-Policy"], "no-referrer")
+            self.assertEqual(r.headers["Cache-Control"], "no-store")
         try:
             self._get("/auth/login/nope/1e1e1e1e-1111-1111-1111-111111111111")
             self.fail("expected HTTPError 404")
         except urllib.error.HTTPError as e:  # HTML path
             self.assertEqual(e.headers["X-Content-Type-Options"], "nosniff")
             self.assertEqual(e.headers["Referrer-Policy"], "no-referrer")
+            self.assertEqual(e.headers["Cache-Control"], "no-store")
 
     def test_login_redirect_carries_the_hardening_headers(self):
         # The 302's own request URL carries the login_nonce, so it must not
@@ -543,6 +566,7 @@ class HandlerTest(unittest.TestCase):
         nonce = "1f1f1f1f-1111-1111-1111-111111111111"
         with self._get(f"/auth/login/github/{nonce}") as r:  # redirect path
             self.assertEqual(r.status, 302)
+            self.assertEqual(r.headers["Cache-Control"], "no-store")
             self.assertEqual(r.headers["X-Content-Type-Options"], "nosniff")
             self.assertEqual(r.headers["Referrer-Policy"], "no-referrer")
 
@@ -741,6 +765,16 @@ class ClientIPTest(unittest.TestCase):
         )
         self.assertEqual(server._client_ip(h), "203.0.113.7")
 
+    def test_repeated_real_ip_lines_take_the_last(self):
+        # Same reasoning as X-Forwarded-For: if a client's own line survives
+        # into the request, our proxy's line is the one that arrives after it.
+        h = _stub_handler(
+            "127.0.0.1",
+            ("X-Real-IP", "9.9.9.9"),
+            ("X-Real-IP", "203.0.113.7"),
+        )
+        self.assertEqual(server._client_ip(h), "203.0.113.7")
+
     def test_an_unusable_x_real_ip_is_rejected(self):
         # A header that is present but not an address tells us the proxy is
         # not the one we were promised. Falling back to the loopback peer here
@@ -760,6 +794,27 @@ class ClientIPTest(unittest.TestCase):
         # inherit the game's exemption.
         h = _stub_handler("127.0.0.1", ("X-Forwarded-For", "203.0.113.7"))
         self.assertFalse(server._is_trusted_loopback(h))
+
+    def test_a_remote_headerless_peer_is_not_trusted(self):
+        # The address check is the whole exemption once the header check has
+        # passed: a headerless request from off-box must not inherit the
+        # game's pass just because it sent no forwarding headers.
+        self.assertFalse(server._is_trusted_loopback(_stub_handler("203.0.113.99")))
+        self.assertFalse(server._is_trusted_loopback(_stub_handler("10.0.0.4")))
+        self.assertFalse(server._is_trusted_loopback(_stub_handler("2001:db8::1")))
+        self.assertFalse(server._is_trusted_loopback(_stub_handler(None)))
+
+    def test_the_whole_127_block_is_loopback(self):
+        # The check is ipaddress-based rather than three literals, so anything
+        # in 127.0.0.0/8 counts — a driver or health checker may source from
+        # an address other than 127.0.0.1.
+        h = _stub_handler("127.0.0.5")
+        self.assertTrue(server._is_trusted_loopback(h))
+        self.assertEqual(server._client_ip(h), "127.0.0.5")
+        self.assertEqual(
+            server._client_ip(_stub_handler("127.0.0.5", ("X-Real-IP", "203.0.113.7"))),
+            "203.0.113.7",
+        )
 
     def test_trusted_hop_count_selects_the_element(self):
         h = _stub_handler(
