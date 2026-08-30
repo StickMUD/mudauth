@@ -129,17 +129,56 @@ def _is_loopback(addr: str | None) -> bool:
         return False
 
 
+def _is_ip_address(value: str) -> bool:
+    """True for a bare IPv4 or IPv6 literal — no port, no brackets."""
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
+
+
+# Fixed at startup by _configure_trusted_proxy_hops(). The request path reads
+# this rather than the environment, so the binding cannot shift under a running
+# service and a bad value is caught once, loudly, instead of on every request.
+_TRUSTED_PROXY_HOPS = 1
+
+
+def _configure_trusted_proxy_hops() -> int:
+    """Validate AUTH_TRUSTED_PROXY_HOPS and fix it for the process's lifetime.
+
+    Raises ``ValueError`` on anything unusable, for the caller to report and
+    exit on. Clamping a typo in silence left the origin binding quietly
+    degraded, which is the one thing a security control must not do: a
+    misconfiguration belongs at ``systemctl start``, not in a live flow.
+    """
+    global _TRUSTED_PROXY_HOPS
+    raw = (os.environ.get("AUTH_TRUSTED_PROXY_HOPS") or "").strip()
+    if not raw:
+        _TRUSTED_PROXY_HOPS = 1
+        return _TRUSTED_PROXY_HOPS
+    try:
+        hops = int(raw)
+    except ValueError:
+        raise ValueError(
+            f"AUTH_TRUSTED_PROXY_HOPS must be a whole number of proxies, not {raw!r}"
+        ) from None
+    if hops < 1:
+        raise ValueError(
+            f"AUTH_TRUSTED_PROXY_HOPS must be at least 1, not {hops}; it counts the "
+            "proxies that append to X-Forwarded-For, and there is always at least one"
+        )
+    _TRUSTED_PROXY_HOPS = hops
+    return _TRUSTED_PROXY_HOPS
+
+
 def _trusted_proxy_hops() -> int:
     """How many proxies append to X-Forwarded-For before it reaches us."""
-    try:
-        hops = int(os.environ.get("AUTH_TRUSTED_PROXY_HOPS", "1"))
-    except ValueError:
-        return 1
-    return max(hops, 1)
+    return _TRUSTED_PROXY_HOPS
 
 
 def _client_ip(handler: BaseHTTPRequestHandler) -> str | None:
-    """The address the request really came from.
+    """The address the request really came from, or None if we cannot tell.
 
     Forwarding headers are hearsay from whoever sent them, so they are read
     only when the immediate peer is loopback — i.e. our own reverse proxy,
@@ -149,9 +188,14 @@ def _client_ip(handler: BaseHTTPRequestHandler) -> str | None:
     Within X-Forwarded-For, the *rightmost* element is the one our proxy
     appended (both shipped configs append rather than replace, as does Apache's
     mod_proxy), so everything to its left is whatever the client chose to send.
-    ``AUTH_TRUSTED_PROXY_HOPS`` counts back further for a chain of proxies; a
-    list shorter than the configured chain is not the shape we were promised,
-    so it is discarded rather than half-trusted.
+    ``AUTH_TRUSTED_PROXY_HOPS`` counts back further for a chain of proxies.
+
+    A forwarding header that is present but not the promised shape — a chain
+    shorter than the configured hop count, or a hop that is not an address —
+    has no answer in it, so None is returned and the caller refuses. Falling
+    back to the peer here would resolve every proxied request to 127.0.0.1,
+    the very origin the game's own flows record, so every origin would match
+    and the binding would be off with nothing in the log to say so.
     """
     peer = handler.client_address[0] if handler.client_address else None
     if not _is_loopback(peer):
@@ -162,11 +206,35 @@ def _client_ip(handler: BaseHTTPRequestHandler) -> str | None:
     parts = [p.strip() for line in lines for p in line.split(",") if p.strip()]
     if parts:
         hops = _trusted_proxy_hops()
-        if hops <= len(parts):
-            return parts[-hops]
-        return peer
-    real = (handler.headers.get_all("X-Real-IP") or [""])[-1].strip()
-    return real or peer
+        if hops > len(parts):
+            print(
+                "[auth][security] forwarded chain is shorter than "
+                f"AUTH_TRUSTED_PROXY_HOPS={hops}: {len(parts)} element(s) via peer "
+                f"{peer}; refusing rather than falling back to the peer address"
+            )
+            return None
+        claimed = parts[-hops]
+        if not _is_ip_address(claimed):
+            print(
+                f"[auth][security] X-Forwarded-For hop {hops} is not an IP address: "
+                f"{claimed[:64]!r} via peer {peer}; refusing"
+            )
+            return None
+        return claimed
+    # Our proxy *sets* X-Real-IP, so the last line is the one it wrote. An
+    # empty or non-address value means the proxy is not the one we were
+    # promised; that is a refusal, not a fallback to the loopback peer.
+    real_lines = handler.headers.get_all("X-Real-IP") or []
+    if real_lines:
+        claimed = real_lines[-1].strip()
+        if not _is_ip_address(claimed):
+            print(
+                f"[auth][security] X-Real-IP is not an IP address: {claimed[:64]!r} "
+                f"via peer {peer}; refusing"
+            )
+            return None
+        return claimed
+    return peer
 
 
 def _is_trusted_loopback(handler: BaseHTTPRequestHandler) -> bool:
@@ -248,9 +316,13 @@ class AuthHandler(BaseHTTPRequestHandler):
     # ── responses ─────────────────────────────────────────────────────────
 
     def _security_headers(self) -> None:
-        """Headers every response carries; these pages render on the MUD's own
-        public origin, so they must not be sniffed into another type and must
-        not leak a nonce- or code-bearing URL in a Referer."""
+        """Headers for every response this handler builds — JSON, HTML, and the
+        /auth/login redirect. An unsupported method or a malformed request line
+        never reaches this code: the stdlib's own send_error answers those, and
+        that response carries none of these. The pages that do come through here
+        render on the MUD's own public origin, so they must not be sniffed into
+        another type and must not leak a nonce- or code-bearing URL in a
+        Referer."""
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
 
@@ -444,15 +516,26 @@ class AuthHandler(BaseHTTPRequestHandler):
             if not entry:
                 self._json(202, {"status": "pending"})
                 return
-            if (
-                entry.get("origin_ip")
-                and _client_ip(self) != entry["origin_ip"]
-                and not _is_trusted_loopback(self)
-            ):
-                # A cross-IP retrieval attempt is a hijack signal worth a trace.
-                print("[auth] token-poll: origin IP mismatch rejected")
-                self._json(403, {"error": "forbidden"})
-                return
+            # The game's own loopback poll is exempt and is checked first, so
+            # that integration keeps working. Everyone else must present the
+            # origin the flow was bound to. Written as an explicit reject: an
+            # origin we never recorded, or a caller address we could not
+            # resolve, is a reason to refuse, not a reason for the comparison
+            # to evaporate and hand the identity to whoever holds the nonce.
+            if not _is_trusted_loopback(self):
+                recorded = entry.get("origin_ip")
+                claimed = _client_ip(self)
+                if not recorded or not claimed or claimed != recorded:
+                    # A cross-IP retrieval is a hijack signal worth a trace,
+                    # and a trace is only useful with the addresses in it.
+                    peer = self.client_address[0] if self.client_address else None
+                    print(
+                        "[auth][security] token-poll: origin rejected — "
+                        f"peer={peer} claimed={claimed} recorded={recorded} "
+                        f"provider={entry.get('provider')}"
+                    )
+                    self._json(403, {"error": "forbidden"})
+                    return
             self.flow.completed.pop(nonce, None)  # one-time retrieval
         self._json(200, {
             "provider": entry["provider"],
@@ -468,14 +551,25 @@ class AuthHandler(BaseHTTPRequestHandler):
         if not nonce or not isinstance(nonce, str) or not _is_uuid(nonce):
             self._json(400, {"error": "invalid nonce"})
             return
-        requester_ip = _client_ip(self)
+        # Same shape as the poll: the loopback exemption first, then an
+        # explicit reject for anything we cannot vouch for. Cancelling
+        # someone else's completed login is a denial of their sign-in.
         loopback = _is_trusted_loopback(self)
+        requester_ip = None if loopback else _client_ip(self)
+        peer = self.client_address[0] if self.client_address else None
         cancelled = 0
         with self.flow.lock:
             entry = self.flow.completed.get(nonce)
             if entry:
-                if entry.get("origin_ip") and requester_ip != entry["origin_ip"] and not loopback:
-                    print("[auth] login-cancel: origin IP mismatch rejected")
+                recorded = entry.get("origin_ip")
+                if not loopback and (
+                    not recorded or not requester_ip or requester_ip != recorded
+                ):
+                    print(
+                        "[auth][security] login-cancel: origin rejected — "
+                        f"peer={peer} claimed={requester_ip} recorded={recorded} "
+                        f"provider={entry.get('provider')}"
+                    )
                     self._json(403, {"error": "forbidden"})
                     return
                 self.flow.completed.pop(nonce, None)
@@ -538,6 +632,10 @@ def _start_ipv6_loopback_companion(port: int) -> None:
 
 
 def make_server(host: str, port: int) -> ThreadingHTTPServer:
+    # Validate before binding anything: a hop count we cannot use degrades the
+    # origin binding, so it has to stop the service, not be clamped into
+    # something that looks fine.
+    hops = _configure_trusted_proxy_hops()
     configs = _load_provider_configs()
     flow = _State()
 
@@ -559,6 +657,7 @@ def make_server(host: str, port: int) -> ThreadingHTTPServer:
     threading.Thread(target=_janitor, daemon=True).start()
     print(
         f"[auth] mudauth {__version__} on {host}:{port} — "
-        f"providers: {sorted(configs.keys()) or '(none configured)'}"
+        f"providers: {sorted(configs.keys()) or '(none configured)'} — "
+        f"trusted proxy hops: {hops}"
     )
     return httpd

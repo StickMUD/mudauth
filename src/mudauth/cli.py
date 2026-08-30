@@ -56,7 +56,12 @@ def serve(args: argparse.Namespace) -> int:
     _apply_env_file(args)
     if args.bind:
         os.environ["AUTH_BIND"] = args.bind
-    httpd = build_server_from_env()
+    try:
+        httpd = build_server_from_env()
+    except ValueError as exc:
+        # Refuse to come up rather than serve with a degraded origin binding.
+        print(f"[auth] configuration error: {exc}", file=sys.stderr)
+        return 2
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -95,6 +100,13 @@ def check(args: argparse.Namespace) -> int:
     print(f"AUTH_BIND: {host}:{port}")
     if not _is_local_host(host):
         print("  WARNING: not a loopback address — this listener has no authentication of its own and must not be reachable off-box; bind 127.0.0.1 and let your reverse proxy front it")
+        problems += 1
+    # `serve` refuses to start on a bad hop count, so `check` has to say so
+    # too rather than reporting a configuration that will not come up.
+    try:
+        print(f"AUTH_TRUSTED_PROXY_HOPS: {server._configure_trusted_proxy_hops()}")
+    except ValueError as exc:
+        print(f"  ERROR: {exc}; `mudauth serve` will refuse to start")
         problems += 1
     configs = server._load_provider_configs()
     enabled = sorted(configs)

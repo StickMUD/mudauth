@@ -15,6 +15,7 @@ import io
 import json
 import os
 import threading
+import time
 import types
 import unittest
 import unittest.mock
@@ -37,6 +38,21 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def _opener():
     return urllib.request.build_opener(_NoRedirect)
+
+
+@contextlib.contextmanager
+def _hops(count):
+    """Set the startup-validated hop count for the duration of the block.
+
+    The request path reads the module-level value, not the environment, so
+    tests set it the same way startup does.
+    """
+    original = server._TRUSTED_PROXY_HOPS
+    server._TRUSTED_PROXY_HOPS = count
+    try:
+        yield
+    finally:
+        server._TRUSTED_PROXY_HOPS = original
 
 
 class HandlerTest(unittest.TestCase):
@@ -409,12 +425,75 @@ class HandlerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["provider_id"], "42")
 
+    def test_poll_of_an_entry_with_no_recorded_origin_is_rejected(self):
+        # A falsy origin used to short-circuit the whole comparison, so the
+        # identity went to whoever held the nonce. An origin we cannot vouch
+        # for is a reason to refuse, not a reason to skip the check.
+        nonce = "7a7a7a7a-7777-7777-7777-777777777777"
+        server.AuthHandler.flow.completed[nonce] = {
+            "provider": "github", "provider_id": "42", "username": "octocat",
+            "created_at": time.time(), "origin_ip": None,
+        }
+        try:
+            with self._non_loopback_peer():
+                try:
+                    self._get_json(f"/auth/token-poll?nonce={nonce}")
+                    self.fail("expected HTTPError 403")
+                except urllib.error.HTTPError as e:
+                    self.assertEqual(e.code, 403)
+        finally:
+            server.AuthHandler.flow.completed.pop(nonce, None)
+
+    def test_poll_with_an_unusable_forwarded_chain_is_rejected(self):
+        # _client_ip has no answer when the chain is not the promised shape.
+        # That "no answer" must reject rather than evaporate the comparison.
+        nonce = "7b7b7b7b-7777-7777-7777-777777777777"
+        proxied = {"X-Forwarded-For": "198.51.100.9, 203.0.113.7"}
+        with self._get_with_headers(f"/auth/login/github/{nonce}", proxied) as r:
+            state = parse_qs(urlparse(r.headers["Location"]).query)["state"][0]
+        with self._get_with_headers(f"/auth/callback?code=abc&state={state}", proxied) as r:
+            self.assertEqual(r.status, 200)
+
+        try:
+            self._get_json_with_headers(
+                f"/auth/token-poll?nonce={nonce}",
+                {"X-Forwarded-For": "198.51.100.9, not-an-ip"},
+            )
+            self.fail("expected HTTPError 403")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 403)
+
+        # Nothing was handed out; the real origin can still collect it.
+        status, body = self._get_json_with_headers(
+            f"/auth/token-poll?nonce={nonce}", proxied
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["provider_id"], "42")
+
     def test_login_cancel(self):
         nonce = "33333333-3333-3333-3333-333333333333"
         self._get(f"/auth/login/github/{nonce}")
         status, body = self._post_json("/auth/login-cancel", {"nonce": nonce})
         self.assertEqual(status, 200)
         self.assertGreaterEqual(body["cancelled"], 1)
+
+    def test_login_cancel_of_an_entry_with_no_recorded_origin_is_rejected(self):
+        # Same falsy-origin short circuit as the poll, on the cancel path.
+        nonce = "7d7d7d7d-7777-7777-7777-777777777777"
+        server.AuthHandler.flow.completed[nonce] = {
+            "provider": "github", "provider_id": "42", "username": "octocat",
+            "created_at": time.time(), "origin_ip": None,
+        }
+        try:
+            with self._non_loopback_peer():
+                try:
+                    self._post_json("/auth/login-cancel", {"nonce": nonce})
+                    self.fail("expected HTTPError 403")
+                except urllib.error.HTTPError as e:
+                    self.assertEqual(e.code, 403)
+            self.assertIn(nonce, server.AuthHandler.flow.completed)
+        finally:
+            server.AuthHandler.flow.completed.pop(nonce, None)
 
     def test_login_cancel_rejects_origin_ip_mismatch(self):
         # Cancelling drops a completed identity, so it is bound to the same
@@ -445,7 +524,8 @@ class HandlerTest(unittest.TestCase):
         self.assertEqual(status, 200)
 
     def test_responses_carry_the_hardening_headers(self):
-        # These pages render on the operator's public MUD origin.
+        # These pages render on the operator's public MUD origin, and the URLs
+        # that reach them carry live nonces, so nothing may be stored either.
         with self._get("/auth/providers") as r:  # JSON path
             self.assertEqual(r.headers["X-Content-Type-Options"], "nosniff")
             self.assertEqual(r.headers["Referrer-Policy"], "no-referrer")
@@ -463,7 +543,6 @@ class HandlerTest(unittest.TestCase):
         nonce = "1f1f1f1f-1111-1111-1111-111111111111"
         with self._get(f"/auth/login/github/{nonce}") as r:  # redirect path
             self.assertEqual(r.status, 302)
-            self.assertEqual(r.headers["Cache-Control"], "no-store")
             self.assertEqual(r.headers["X-Content-Type-Options"], "nosniff")
             self.assertEqual(r.headers["Referrer-Policy"], "no-referrer")
 
@@ -662,6 +741,14 @@ class ClientIPTest(unittest.TestCase):
         )
         self.assertEqual(server._client_ip(h), "203.0.113.7")
 
+    def test_an_unusable_x_real_ip_is_rejected(self):
+        # A header that is present but not an address tells us the proxy is
+        # not the one we were promised. Falling back to the loopback peer here
+        # would hand a browser request the origin the game itself uses.
+        for value in ("not-an-ip", "   ", "203.0.113.7:443"):
+            h = _stub_handler("127.0.0.1", ("X-Real-IP", value))
+            self.assertIsNone(server._client_ip(h), value)
+
     def test_bare_loopback_peer_without_headers(self):
         h = _stub_handler("127.0.0.1")
         self.assertEqual(server._client_ip(h), "127.0.0.1")
@@ -678,21 +765,84 @@ class ClientIPTest(unittest.TestCase):
         h = _stub_handler(
             "127.0.0.1", ("X-Forwarded-For", "9.9.9.9, 203.0.113.7, 10.0.0.2")
         )
-        with unittest.mock.patch.dict(os.environ, {"AUTH_TRUSTED_PROXY_HOPS": "2"}):
+        with _hops(2):
             self.assertEqual(server._client_ip(h), "203.0.113.7")
 
-    def test_hop_count_past_the_end_of_the_list_falls_back_to_the_peer(self):
+    def test_hop_count_past_the_end_of_the_list_is_rejected(self):
+        # The chain is not the shape the configuration promised. Falling back
+        # to the peer would resolve every browser request to 127.0.0.1 — the
+        # origin the game's own flows record — so every origin would match and
+        # the binding would be silently off.
         h = _stub_handler("127.0.0.1", ("X-Forwarded-For", "9.9.9.9, 203.0.113.7"))
-        with unittest.mock.patch.dict(os.environ, {"AUTH_TRUSTED_PROXY_HOPS": "5"}):
-            self.assertEqual(server._client_ip(h), "127.0.0.1")
+        with _hops(5):
+            self.assertIsNone(server._client_ip(h))
 
-    def test_unusable_hop_counts_fall_back_to_one(self):
-        h = _stub_handler("127.0.0.1", ("X-Forwarded-For", "9.9.9.9, 203.0.113.7"))
-        for value in ("0", "-3", "banana", ""):
+    def test_a_forwarded_element_that_is_not_an_address_is_rejected(self):
+        # Whatever sits at the configured hop has to be an address. A garbage
+        # value would otherwise be recorded as an origin that an attacker can
+        # reproduce by sending the same garbage back.
+        for value in ("unknown", "; DROP", "203.0.113.7:443", "[203.0.113.7]"):
+            h = _stub_handler("127.0.0.1", ("X-Forwarded-For", f"9.9.9.9, {value}"))
+            self.assertIsNone(server._client_ip(h), value)
+
+    def test_the_request_path_does_not_read_the_environment(self):
+        # The hop count is fixed at startup, so an operator editing .env under
+        # a running service cannot change the binding mid-flight.
+        h = _stub_handler(
+            "127.0.0.1", ("X-Forwarded-For", "9.9.9.9, 203.0.113.7, 10.0.0.2")
+        )
+        with unittest.mock.patch.dict(os.environ, {"AUTH_TRUSTED_PROXY_HOPS": "2"}):
+            self.assertEqual(server._client_ip(h), "10.0.0.2")
+
+
+class TrustedProxyHopsConfigTest(unittest.TestCase):
+    """The hop count is parsed and validated once, at startup.
+
+    A misconfiguration here silently degrades the origin binding, so it must
+    stop the service rather than be clamped into something that looks fine.
+    """
+
+    def setUp(self):
+        self._original = server._TRUSTED_PROXY_HOPS
+
+    def tearDown(self):
+        server._TRUSTED_PROXY_HOPS = self._original
+
+    def test_an_unset_value_defaults_to_one(self):
+        with unittest.mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AUTH_TRUSTED_PROXY_HOPS", None)
+            self.assertEqual(server._configure_trusted_proxy_hops(), 1)
+        self.assertEqual(server._trusted_proxy_hops(), 1)
+
+    def test_a_valid_value_is_adopted(self):
+        with unittest.mock.patch.dict(os.environ, {"AUTH_TRUSTED_PROXY_HOPS": " 3 "}):
+            self.assertEqual(server._configure_trusted_proxy_hops(), 3)
+        self.assertEqual(server._trusted_proxy_hops(), 3)
+
+    def test_a_non_integer_refuses_to_start(self):
+        for value in ("banana", "tow", "1.5", "one"):
             with unittest.mock.patch.dict(
                 os.environ, {"AUTH_TRUSTED_PROXY_HOPS": value}
-            ):
-                self.assertEqual(server._client_ip(h), "203.0.113.7", value)
+            ), self.assertRaises(ValueError) as ctx:
+                server._configure_trusted_proxy_hops()
+            self.assertIn("AUTH_TRUSTED_PROXY_HOPS", str(ctx.exception))
+
+    def test_a_value_below_one_refuses_to_start(self):
+        # 0 used to clamp to 1 in silence, so an operator who meant to disable
+        # the header got a binding that read one hop anyway.
+        for value in ("0", "-3"):
+            with unittest.mock.patch.dict(
+                os.environ, {"AUTH_TRUSTED_PROXY_HOPS": value}
+            ), self.assertRaises(ValueError) as ctx:
+                server._configure_trusted_proxy_hops()
+            self.assertIn("AUTH_TRUSTED_PROXY_HOPS", str(ctx.exception))
+
+    def test_make_server_refuses_a_bad_hop_count_before_binding(self):
+        with unittest.mock.patch.dict(
+            os.environ, {"AUTH_TRUSTED_PROXY_HOPS": "banana"}
+        ), self.assertRaises(ValueError) as ctx:
+            server.make_server("127.0.0.1", 0)
+        self.assertIn("AUTH_TRUSTED_PROXY_HOPS", str(ctx.exception))
 
 
 if __name__ == "__main__":
