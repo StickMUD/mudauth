@@ -257,7 +257,12 @@ Getting the order backwards (service restarted first) is what takes logins down:
 1. Set **the same value** as `AUTH_SERVICE_TOKEN` in both `/etc/mudauth/.env` and
    the game's environment (generate one with
    `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`), but restart
-   neither process yet.
+   neither process yet. The token must be `A-Z a-z 0-9 _ -` only, which
+   `secrets.token_urlsafe` already guarantees; the game's client silently drops
+   anything outside that charset instead of sending it, and the service refuses
+   to start rather than expect a secret its only caller can never present.
+   Surrounding whitespace is stripped on both sides, so a stray trailing space
+   from a copy-paste is harmless.
 2. **Restart the game** (or its driver) first. It now reads `AUTH_SERVICE_TOKEN`
    from its own environment at call time and sends `X-Auth-Service-Token` on every
    request. The service, still running its old process with the token unset,

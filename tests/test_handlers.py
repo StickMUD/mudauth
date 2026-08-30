@@ -1260,6 +1260,43 @@ class AuthServiceTokenConfigTest(unittest.TestCase):
             self.assertEqual(server._configure_auth_service_token(), "s3cr3t")
         self.assertEqual(server._AUTH_SERVICE_TOKEN, "s3cr3t")
 
+    def test_a_value_with_surrounding_whitespace_is_stripped(self):
+        # A trailing space is trivially easy to introduce in a .env file. The
+        # client strips its copy before sending (client.py); if this side did
+        # not also strip, the two sides would normalise to different strings
+        # and never compare equal, even though both looked configured.
+        with unittest.mock.patch.dict(os.environ, {"AUTH_SERVICE_TOKEN": " s3cr3t "}):
+            self.assertEqual(server._configure_auth_service_token(), "s3cr3t")
+        self.assertEqual(server._AUTH_SERVICE_TOKEN, "s3cr3t")
+
+    def test_a_whitespace_only_value_is_treated_as_unset(self):
+        with unittest.mock.patch.dict(os.environ, {"AUTH_SERVICE_TOKEN": "   "}):
+            self.assertIsNone(server._configure_auth_service_token())
+        self.assertIsNone(server._AUTH_SERVICE_TOKEN)
+
+    def test_a_value_outside_the_clients_charset_refuses_to_start(self):
+        # The client (client.py's _SAFE_TOKEN_RE) refuses to transmit
+        # anything outside [A-Za-z0-9_-], so a service that accepted such a
+        # token would be up but permanently unauthenticatable by the only
+        # caller that matters. Refuse to start instead, mirroring the
+        # hop-count validation above.
+        with unittest.mock.patch.dict(
+            os.environ, {"AUTH_SERVICE_TOKEN": "s3cr3t token"}
+        ), self.assertRaises(ValueError) as ctx:
+            server._configure_auth_service_token()
+        message = str(ctx.exception)
+        self.assertIn("AUTH_SERVICE_TOKEN", message)
+        self.assertNotIn("s3cr3t token", message)
+
+    def test_make_server_refuses_a_bad_charset_token_before_binding(self):
+        with unittest.mock.patch.dict(
+            os.environ, {"AUTH_SERVICE_TOKEN": "bad!token"}
+        ), self.assertRaises(ValueError) as ctx:
+            server.make_server("127.0.0.1", 0)
+        message = str(ctx.exception)
+        self.assertIn("AUTH_SERVICE_TOKEN", message)
+        self.assertNotIn("bad!token", message)
+
     @staticmethod
     def _serve_and_close(httpd):
         """shutdown() waits on an event only serve_forever() sets, so a

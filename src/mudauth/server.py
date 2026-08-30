@@ -204,6 +204,12 @@ def _trusted_proxy_hops() -> int:
 # The header the game presents its shared secret in. One name, used consistently.
 AUTH_SERVICE_TOKEN_HEADER = "X-Auth-Service-Token"
 
+# The client's own charset guard (client.py's _SAFE_TOKEN_RE) refuses to
+# transmit anything outside this charset. Kept in sync with that regex by
+# hand -- the two modules do not share an import, since the client's copy has
+# to survive without this service's other dependencies.
+_TOKEN_CHARSET_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
 # Fixed at startup by _configure_auth_service_token(), for the same reason the
 # hop count is: the request path must not be able to drift under a running
 # service just because someone edited the environment.
@@ -214,10 +220,38 @@ def _configure_auth_service_token() -> str | None:
     """Read AUTH_SERVICE_TOKEN once at startup and fix it for the process's
     lifetime. Returns the token, or None if unset -- the caller uses that to
     decide whether to print the legacy-path startup warning.
+
+    Stripped, and whitespace-only treated as unset, mirroring
+    _configure_trusted_proxy_hops() and the client's own normalisation
+    (client.py strips before sending): a trailing space is trivial to
+    introduce in a ``.env`` file, and without matching normalisation on both
+    sides a configuration that looks correct on both can never produce a
+    matching header.
+
+    Raises ``ValueError`` -- for the caller to report and exit on, same as a
+    bad hop count -- when the token is non-empty but contains a character the
+    client's own charset guard will never send. Starting up to require a
+    secret the only caller that matters refuses to transmit is worse than
+    refusing to start: a misconfiguration belongs at ``systemctl start``, not
+    in a live flow that hangs until timeout.
     """
     global _AUTH_SERVICE_TOKEN
-    raw = os.environ.get("AUTH_SERVICE_TOKEN")
-    _AUTH_SERVICE_TOKEN = raw if raw else None
+    raw = (os.environ.get("AUTH_SERVICE_TOKEN") or "").strip()
+    if not raw:
+        _AUTH_SERVICE_TOKEN = None
+        return None
+    if not _TOKEN_CHARSET_RE.match(raw):
+        # Name the offending characters, never the token: enough for an
+        # operator to spot a stray copy-paste artifact without this message
+        # itself becoming a place the secret gets logged.
+        bad = sorted({c for c in raw if not _TOKEN_CHARSET_RE.match(c)})
+        raise ValueError(
+            "AUTH_SERVICE_TOKEN contains character(s) the client will never "
+            f"send: {bad!r}; only A-Z a-z 0-9 _ - are accepted. Generate a "
+            'safe token with: python3 -c "import secrets; '
+            'print(secrets.token_urlsafe(32))"'
+        )
+    _AUTH_SERVICE_TOKEN = raw
     return _AUTH_SERVICE_TOKEN
 
 

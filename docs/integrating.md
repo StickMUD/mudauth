@@ -31,7 +31,10 @@ carry that same value in the `X-Auth-Service-Token` header, or the loopback exem
 is refused and your poll falls through to the ordinary (and, for a loopback-started
 flow, unsatisfiable) origin-IP check. `mudauth.client.request()` and the LDMud efun
 below add this header automatically from the game's own environment; a from-scratch
-HTTP integration must add it itself.
+HTTP integration must add it itself. The token must be `A-Z a-z 0-9 _ -` only —
+`mudauth.client.request()` silently omits the header rather than send anything
+outside that charset, and the service refuses to start on a token it would
+never receive.
 
 ## LDMud
 
