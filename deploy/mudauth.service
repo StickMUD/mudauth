@@ -1,0 +1,31 @@
+[Unit]
+Description=mudauth OAuth/OIDC sign-in broker
+Documentation=https://github.com/StickMUD/mudauth
+After=network.target
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=mudauth
+Group=mudauth
+EnvironmentFile=/etc/mudauth/.env
+ExecStart=/home/mudauth/.local/bin/mudauth serve
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+LimitNOFILE=8192
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mudauth
+
+[Install]
+WantedBy=multi-user.target
