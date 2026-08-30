@@ -125,6 +125,21 @@ verifies them; it has no store to keep them in.
   integration: a game that starts the flow over loopback records the loopback address
   as the origin, so the binding constrains nothing on that path — the nonce is the
   credential there.
+- **The loopback exemption itself, `AUTH_SERVICE_TOKEN`:** header-absence alone
+  identifies the game only by *not* seeing evidence of a proxy, which a proxy
+  misconfiguration (`ProxyAddHeaders Off`, a hand-rolled vhost, a different front end)
+  can manufacture for every internet caller at once — every request would then arrive
+  from `127.0.0.1` with no forwarding header, indistinguishable from the game, and the
+  origin check would be skipped entirely with nothing in the log to say so. Setting
+  `AUTH_SERVICE_TOKEN` (the same value in the service's environment and the game's)
+  replaces that with positive evidence: the exemption requires a loopback peer **and**
+  a matching token in `X-Auth-Service-Token`, compared with `hmac.compare_digest` since
+  it is a bearer credential. A valid token from a non-loopback peer is still refused —
+  both are required, defense in depth. Unset, the legacy header-absence rule stands
+  exactly as above, so an existing deployment does not break on restart; the service
+  prints a startup warning recommending the token be set. The token is never logged,
+  on any path. See [deploy.md](deploy.md) for the required migration order — the
+  service must not start requiring the token before the game is sending it.
 - **Confidential client only:** there is no native-capture or client-driven flow, so
   no PKCE. The `client_secret` is used server-side and never leaves the service.
 - **Secrets:** provider `client_secret`s live only in the service's environment, never

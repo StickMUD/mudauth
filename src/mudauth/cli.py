@@ -108,6 +108,14 @@ def check(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"  ERROR: {exc}; `mudauth serve` will refuse to start")
         problems += 1
+    # Unset is a deliberately supported, backward-compatible state (not a
+    # problem to count), but an operator should still see it at a glance.
+    token = server._configure_auth_service_token()
+    if token:
+        print("AUTH_SERVICE_TOKEN: configured")
+    else:
+        print("AUTH_SERVICE_TOKEN: not set — the loopback exemption falls back to "
+              "peer + absent forwarding headers; see docs/deploy.md")
     configs = server._load_provider_configs()
     enabled = sorted(configs)
     print(f"providers enabled: {', '.join(enabled) or '(none)'}")

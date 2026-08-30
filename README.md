@@ -62,6 +62,7 @@ All settings are environment variables; `--env-file` loads a `KEY=VALUE` file.
 | `AUTH_CALLBACK_URL` | `$AUTH_PUBLIC_BASE/auth/callback` | Redirect URI registered with each provider |
 | `AUTH_BRAND_NAME` | `mudauth` | Name on the "you may close this tab" page |
 | `AUTH_TRUSTED_PROXY_HOPS` | `1` | Proxies that append to `X-Forwarded-For` between the browser and the service |
+| `AUTH_SERVICE_TOKEN` | unset | Shared secret identifying the game to the loopback exemption; set the *same* value in the game's environment. Recommended — see [docs/deploy.md](docs/deploy.md) for the migration order. |
 | `AUTH_USER_AGENT` | `mudauth/<version>` | Outbound User-Agent; set it to name your game |
 | `<PROVIDER>_CLIENT_ID` / `_CLIENT_SECRET` | — | Enables that provider |
 | `<PROVIDER>_CALLBACK_URL` | `$AUTH_CALLBACK_URL` | Per-provider override |
@@ -91,6 +92,15 @@ than being clamped — and the effective count is printed in the startup banner.
 request's forwarding header is not the shape that count promises, or carries something
 that is not an IP address, the service logs an `[auth][security]` line and refuses the
 request; it never falls back to the loopback peer, which would make every origin match.
+
+That "loopback caller" test is itself worth strengthening: by default it rests on the
+*absence* of `X-Forwarded-For`/`X-Real-IP`, which a proxy that stops adding them (a
+misconfiguration, not an attack) can erase for every internet caller at once. Set
+`AUTH_SERVICE_TOKEN` to the same value in the service's environment and the game's, and
+the exemption instead requires a loopback peer **and** a matching `X-Auth-Service-Token`
+header. Unset is a supported, backward-compatible default — the service warns at startup
+— but see [docs/deploy.md](docs/deploy.md) for the order to turn it on without taking
+logins down.
 
 Both shipped proxy configs turn access logging off for `/auth/`, because the request
 line carries the nonce and the authorization code. Report vulnerabilities per

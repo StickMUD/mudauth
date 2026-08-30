@@ -25,6 +25,14 @@ its own.
 
 Full status-code contract: [protocol.md](protocol.md).
 
+If the service has `AUTH_SERVICE_TOKEN` configured (recommended; see
+[deploy.md](deploy.md) for the migration order), every request your game makes must
+carry that same value in the `X-Auth-Service-Token` header, or the loopback exemption
+is refused and your poll falls through to the ordinary (and, for a loopback-started
+flow, unsatisfiable) origin-IP check. `mudauth.client.request()` and the LDMud efun
+below add this header automatically from the game's own environment; a from-scratch
+HTTP integration must add it itself.
+
 ## LDMud
 
     pip install "mudauth[ldmud]"
@@ -33,13 +41,18 @@ registers the python efun `string auth_service_request(string method, string pat
 returning a JSON string `{"status": int, "body": string}` (status 0 when the service
 is down — fall back to password login). Only `GET` and `POST` are accepted; any other
 method also returns status 0. Set `AUTH_SERVICE_URL` in the driver's environment if
-the listener is not on `http://127.0.0.1:7700`. Restart the driver after installing;
-efuns load at start.
+the listener is not on `http://127.0.0.1:7700`, and `AUTH_SERVICE_TOKEN` if the
+service requires it (read at call time, so no particular process start order is
+needed relative to the environment). Restart the driver after installing; efuns load
+at start.
 
 ## Anything with an HTTP client (Evennia, Node, Go, ...)
 
 Call the endpoints directly. `mudauth.client.request()` is a thin `urllib` wrapper
-you can read as a reference; it is not required.
+you can read as a reference; it is not required. If you write your own client and the
+service has `AUTH_SERVICE_TOKEN` set, send it as `X-Auth-Service-Token` on every
+request — otherwise your game's own loopback polls are indistinguishable from an
+ordinary remote caller and are bound by the origin-IP check like anyone else.
 
 ## Reference implementation
 

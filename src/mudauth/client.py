@@ -3,6 +3,11 @@
 Games that cannot speak HTTP natively (LPC, for example) call this from
 whatever host-language bridge they have. Anything that *can* speak HTTP can
 ignore this module and follow docs/protocol.md directly.
+
+When AUTH_SERVICE_TOKEN is set in the game's own environment, every request
+carries it in X-Auth-Service-Token, which is how the service tells this game
+apart from a browser once that check is enabled -- see server.py's
+_is_trusted_loopback and docs/deploy.md for the required migration order.
 """
 
 from __future__ import annotations
@@ -13,6 +18,12 @@ import urllib.error
 import urllib.request
 
 DEFAULT_BASE_URL = os.environ.get("AUTH_SERVICE_URL", "http://127.0.0.1:7700")
+
+# Header carrying the shared secret that identifies this game to the auth
+# service as trusted-loopback, once AUTH_SERVICE_TOKEN is configured (see
+# server.py's _is_trusted_loopback). Must match server.py's
+# AUTH_SERVICE_TOKEN_HEADER.
+AUTH_SERVICE_TOKEN_HEADER = "X-Auth-Service-Token"
 
 _logger = logging.getLogger(__name__)
 
@@ -39,6 +50,12 @@ def request(
 
     data = None
     headers = {"Accept": "application/json"}
+    # Read at call time, not at import, so a test can set/unset it around a
+    # single request and so an operator does not need a specific process
+    # start order for this module vs. the environment.
+    token = os.environ.get("AUTH_SERVICE_TOKEN")
+    if token:
+        headers[AUTH_SERVICE_TOKEN_HEADER] = token
     if method == "POST":
         data = (body or "{}").encode("utf-8")
         headers["Content-Type"] = "application/json"

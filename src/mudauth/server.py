@@ -26,14 +26,21 @@ Security model (adapted from MUDdown's auth.ts for loopback):
   * ``login_nonce`` is a client UUID; the verified identity is returned exactly
     once from token-poll then deleted; 10-minute TTL;
   * the IP that started the flow is recorded and must match the poller, except
-    trusted loopback callers (the MUD) which are exempt. Forwarding headers are
+    trusted loopback callers (the game) which are exempt. Forwarding headers are
     read only from a loopback peer (our own reverse proxy) and only from the
     right-hand end, so a caller cannot name its own origin;
+  * the loopback exemption itself: when ``AUTH_SERVICE_TOKEN`` is set, it rests
+    on positive evidence — a loopback peer presenting that shared secret in
+    ``X-Auth-Service-Token`` — rather than the mere absence of forwarding
+    headers, which a proxy misconfiguration can manufacture for anyone. Unset,
+    the legacy header-absence behavior stands, so existing deployments do not
+    break on restart;
   * provider ``client_secret`` lives only in this service's config.
 """
 
 from __future__ import annotations
 
+import hmac
 import html
 import ipaddress
 import json
@@ -177,6 +184,26 @@ def _trusted_proxy_hops() -> int:
     return _TRUSTED_PROXY_HOPS
 
 
+# The header the game presents its shared secret in. One name, used consistently.
+AUTH_SERVICE_TOKEN_HEADER = "X-Auth-Service-Token"
+
+# Fixed at startup by _configure_auth_service_token(), for the same reason the
+# hop count is: the request path must not be able to drift under a running
+# service just because someone edited the environment.
+_AUTH_SERVICE_TOKEN: str | None = None
+
+
+def _configure_auth_service_token() -> str | None:
+    """Read AUTH_SERVICE_TOKEN once at startup and fix it for the process's
+    lifetime. Returns the token, or None if unset -- the caller uses that to
+    decide whether to print the legacy-path startup warning.
+    """
+    global _AUTH_SERVICE_TOKEN
+    raw = os.environ.get("AUTH_SERVICE_TOKEN")
+    _AUTH_SERVICE_TOKEN = raw if raw else None
+    return _AUTH_SERVICE_TOKEN
+
+
 def _client_ip(handler: BaseHTTPRequestHandler) -> str | None:
     """The address the request really came from, or None if we cannot tell.
 
@@ -242,13 +269,34 @@ def _is_trusted_loopback(handler: BaseHTTPRequestHandler) -> bool:
 
     Our own proxy also reaches us over loopback, so the peer address alone
     cannot tell the game apart from a browser on the far side of the proxy.
-    The forwarding headers are what distinguish them: a request carrying one
-    passed through the proxy and stands for a remote client, so it keeps the
-    origin binding instead of inheriting the game's exemption.
+
+    When AUTH_SERVICE_TOKEN is configured, the exemption rests on positive
+    evidence: a loopback peer presenting that shared secret in
+    AUTH_SERVICE_TOKEN_HEADER, compared with hmac.compare_digest since it is a
+    bearer credential. The absence of forwarding headers is no longer
+    sufficient on its own -- a proxy that stops adding them (ProxyAddHeaders
+    Off, a hand-rolled vhost, a different front end) would otherwise make
+    every internet request indistinguishable from the game. A valid token
+    from a non-loopback peer is still refused; both are required.
+
+    When AUTH_SERVICE_TOKEN is unset, today's behavior is unchanged so an
+    existing deployment does not break on restart: a request carrying a
+    forwarding header passed through the proxy and stands for a remote
+    client, so it keeps the origin binding instead of inheriting the game's
+    exemption.
     """
-    if "X-Forwarded-For" in handler.headers or "X-Real-IP" in handler.headers:
+    peer = handler.client_address[0] if handler.client_address else None
+    if not _is_loopback(peer):
         return False
-    return _is_loopback(handler.client_address[0] if handler.client_address else None)
+    if _AUTH_SERVICE_TOKEN:
+        supplied = handler.headers.get(AUTH_SERVICE_TOKEN_HEADER) or ""
+        # Compare as bytes: compare_digest raises TypeError on non-ASCII str
+        # input, and the header is attacker-controlled even on this branch
+        # (a loopback caller without the real token is exactly the local
+        # process / SSRF this token is meant to keep out) -- a malformed
+        # value must fail the check, not crash the request thread.
+        return hmac.compare_digest(supplied.encode(), _AUTH_SERVICE_TOKEN.encode())
+    return "X-Forwarded-For" not in handler.headers and "X-Real-IP" not in handler.headers
 
 
 _UUID_RE = re.compile(
@@ -267,6 +315,23 @@ _UUID_ANYWHERE_RE = re.compile(
 
 def _is_uuid(value: str) -> bool:
     return bool(_UUID_RE.match(value))
+
+
+def _log_rejected_exemption(
+    endpoint: str, peer: str | None, claimed: str | None, recorded, provider
+) -> None:
+    """A loopback peer tried to claim the game's exemption and failed the
+    token check. Worth its own line, distinct from an ordinary origin
+    mismatch: this is specifically someone on-box without the shared secret,
+    which is the exact gap AUTH_SERVICE_TOKEN closes. Same evidence
+    conventions as the origin-mismatch logging below -- peer, claimed origin,
+    recorded origin, provider -- and never the credential itself.
+    """
+    print(
+        f"[auth][security] {endpoint}: loopback exemption denied (missing or "
+        f"invalid {AUTH_SERVICE_TOKEN_HEADER}) — peer={peer} claimed={claimed} "
+        f"recorded={recorded} provider={provider}"
+    )
 
 
 # ── Request handler ───────────────────────────────────────────────────────────
@@ -525,10 +590,14 @@ class AuthHandler(BaseHTTPRequestHandler):
             if not _is_trusted_loopback(self):
                 recorded = entry.get("origin_ip")
                 claimed = _client_ip(self)
+                peer = self.client_address[0] if self.client_address else None
+                if _AUTH_SERVICE_TOKEN and _is_loopback(peer):
+                    _log_rejected_exemption(
+                        "token-poll", peer, claimed, recorded, entry.get("provider")
+                    )
                 if not recorded or not claimed or claimed != recorded:
                     # A cross-IP retrieval is a hijack signal worth a trace,
                     # and a trace is only useful with the addresses in it.
-                    peer = self.client_address[0] if self.client_address else None
                     print(
                         "[auth][security] token-poll: origin rejected — "
                         f"peer={peer} claimed={claimed} recorded={recorded} "
@@ -562,6 +631,10 @@ class AuthHandler(BaseHTTPRequestHandler):
             entry = self.flow.completed.get(nonce)
             if entry:
                 recorded = entry.get("origin_ip")
+                if not loopback and _AUTH_SERVICE_TOKEN and _is_loopback(peer):
+                    _log_rejected_exemption(
+                        "login-cancel", peer, requester_ip, recorded, entry.get("provider")
+                    )
                 if not loopback and (
                     not recorded or not requester_ip or requester_ip != recorded
                 ):
@@ -636,6 +709,7 @@ def make_server(host: str, port: int) -> ThreadingHTTPServer:
     # origin binding, so it has to stop the service, not be clamped into
     # something that looks fine.
     hops = _configure_trusted_proxy_hops()
+    token = _configure_auth_service_token()
     configs = _load_provider_configs()
     flow = _State()
 
@@ -655,9 +729,19 @@ def make_server(host: str, port: int) -> ThreadingHTTPServer:
             flow.sweep()
 
     threading.Thread(target=_janitor, daemon=True).start()
+    if not token:
+        print(
+            "[auth] AUTH_SERVICE_TOKEN is not set — the game is identified only "
+            "by loopback peer + absent forwarding headers. If the reverse proxy "
+            "ever stops adding those headers, every internet request looks like "
+            "the game and the origin check is skipped entirely. Set "
+            "AUTH_SERVICE_TOKEN here and in the game's environment to close "
+            "this gap; see docs/deploy.md for the migration order."
+        )
     print(
         f"[auth] mudauth {__version__} on {host}:{port} — "
         f"providers: {sorted(configs.keys()) or '(none configured)'} — "
-        f"trusted proxy hops: {hops}"
+        f"trusted proxy hops: {hops} — "
+        f"auth service token: {'configured' if token else 'NOT SET'}"
     )
     return httpd

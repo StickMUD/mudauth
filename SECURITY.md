@@ -22,3 +22,11 @@ fail open on one: a value that is not a whole number of at least 1 stops the
 service at startup, and a request whose forwarding header does not match the
 configured shape is refused and logged with an `[auth][security]` prefix rather
 than falling back to the loopback peer address.
+
+Without `AUTH_SERVICE_TOKEN`, the loopback exemption (see docs/protocol.md#security)
+rests on the *absence* of forwarding headers, which is evidence of absence, not
+evidence of presence: a proxy that stops adding them makes every internet request
+indistinguishable from the game. Set `AUTH_SERVICE_TOKEN` (the same value in the
+service's environment and the game's) to close that gap with a shared secret,
+checked with `hmac.compare_digest` and never logged. See docs/deploy.md for the
+migration order that avoids taking logins down when you turn it on.
