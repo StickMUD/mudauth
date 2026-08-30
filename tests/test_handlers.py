@@ -456,6 +456,17 @@ class HandlerTest(unittest.TestCase):
             self.assertEqual(e.headers["X-Content-Type-Options"], "nosniff")
             self.assertEqual(e.headers["Referrer-Policy"], "no-referrer")
 
+    def test_login_redirect_carries_the_hardening_headers(self):
+        # The 302's own request URL carries the login_nonce, so it must not
+        # be cached, and it renders on the operator's public origin like the
+        # rest.
+        nonce = "1f1f1f1f-1111-1111-1111-111111111111"
+        with self._get(f"/auth/login/github/{nonce}") as r:  # redirect path
+            self.assertEqual(r.status, 302)
+            self.assertEqual(r.headers["Cache-Control"], "no-store")
+            self.assertEqual(r.headers["X-Content-Type-Options"], "nosniff")
+            self.assertEqual(r.headers["Referrer-Policy"], "no-referrer")
+
     def test_login_with_a_malformed_nonce_is_400(self):
         try:
             self._get("/auth/login/github/not-a-uuid")

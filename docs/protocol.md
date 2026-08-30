@@ -137,9 +137,12 @@ verifies them; it has no store to keep them in.
 
 Every status code below is what `AuthHandler` in `src/mudauth/server.py` actually
 sends. JSON responses carry `Content-Type: application/json`; HTML responses carry
-`text/html; charset=utf-8`. All responses set `Cache-Control: no-store`,
-`X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer` — these pages
-render on your public MUD origin, and the URLs that reach them carry live nonces.
+`text/html; charset=utf-8`. Every response this service builds — JSON, HTML, and the
+`/auth/login` redirect — sets `Cache-Control: no-store`, `X-Content-Type-Options:
+nosniff` and `Referrer-Policy: no-referrer` — these pages render on your public MUD
+origin, and the URLs that reach them carry live nonces. A malformed request line never
+reaches our handler code; the stdlib's own `send_error` response for that case carries
+none of these.
 
 Any path other than the six below answers **404** `{"error":"not found"}` — for both
 GET and POST. Methods other than GET and POST get the stdlib `http.server` default of

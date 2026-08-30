@@ -264,8 +264,8 @@ class AuthHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _html(self, code: int, html: str) -> None:
-        body = html.encode()
+    def _html(self, code: int, body_html: str) -> None:
+        body = body_html.encode()
         self.send_response(code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -341,6 +341,8 @@ class AuthHandler(BaseHTTPRequestHandler):
         authorize = providers.build_authorize_url(provider, self.configs[provider], state)
         self.send_response(302)
         self.send_header("Location", authorize)
+        self.send_header("Cache-Control", "no-store")
+        self._security_headers()
         self.end_headers()
 
     # ── /auth/callback ────────────────────────────────────────────────────
