@@ -140,22 +140,43 @@ manages, typically `/etc/apache2/sites-available/mud.example-le-ssl.conf`. Find 
 ```apache
 ProxyPreserveHost On
 RequestHeader set X-Forwarded-Proto "https"
+RequestHeader set X-Real-IP "%{REMOTE_ADDR}s"
+ProxyAddHeaders On
 
 ProxyPass        /auth/ http://127.0.0.1:7700/auth/
 ProxyPassReverse /auth/ http://127.0.0.1:7700/auth/
 ```
 
+`ProxyAddHeaders On` is `mod_proxy`'s default, and it is what appends the client to
+`X-Forwarded-For`. It is stated explicitly because turning it `Off` — a common privacy
+hardening — would strip the forwarding headers, and every internet request would then
+reach the service from `127.0.0.1` with nothing to distinguish it from the game's own
+loopback calls: origin binding would be skipped entirely. The explicit `X-Real-IP` line
+pins the other header the service reads rather than leaving it to an implicit default,
+and overwrites any `X-Real-IP` the client sent.
+
+Also suppress access logging for these requests. The request line carries the
+`login_nonce`, `?code=` and Steam's signed assertion, so this vhost's `CustomLog` would
+record live credentials for their 10-minute lifetime — the same exposure nginx's
+`access_log off` closes. Amend the vhost's existing `CustomLog`, rather than adding a
+second one:
+
+```apache
+SetEnvIf Request_URI "^/auth/" auth_request
+CustomLog /var/log/apache2/mud.example-access.log combined env=!auth_request
+```
+
 Enable the modules once, then validate and reload:
 
 ```bash
-sudo a2enmod proxy proxy_http headers
+sudo a2enmod proxy proxy_http headers setenvif
 sudo certbot --apache -d mud.example -d www.mud.example
 sudo apache2ctl configtest && sudo systemctl reload apache2
 ```
 
 [`../deploy/apache/mudauth.conf`](../deploy/apache/mudauth.conf) is the same snippet
-with commentary on canonical hosts, rate limiting, and running a second instance. Do
-not `Include` it as a vhost of its own.
+with commentary on canonical hosts, access logging, rate limiting, and running a second
+instance. Do not `Include` it as a vhost of its own.
 
 ## 5. Point the running game at the service
 
