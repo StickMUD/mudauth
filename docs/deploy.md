@@ -21,7 +21,14 @@ sudo -u mudauth -H pipx install mudauth     # or: pip install --user mudauth
 
 Requirements: Python 3.11+ and the standard library. `mudauth` has no runtime
 dependencies. (`mudauth apple-secret` is the one exception — it needs the optional
-`apple` extra, and you only ever run it by hand.)
+`apple` extra, and you only ever run it by hand.) `pipx` itself must be installed
+system-wide (`sudo apt install pipx`) for the `sudo -u` invocation to find it; the
+`pip install --user` alternative has the same effect.
+
+That install puts the entry point at `/home/mudauth/.local/bin/mudauth`, which is
+where the shipped systemd unit expects it. It is on the `mudauth` user's `PATH`, not
+on yours — every later command in this guide either runs as root or names that path
+in full.
 
 The service is stateless, so there is no data directory to provision.
 
@@ -29,13 +36,19 @@ The service is stateless, so there is no data directory to provision.
 
 `.env.example` and everything under `deploy/` are **not** installed by the package —
 `pipx`/`pip` ship only the Python code and the `mudauth` entry point. Every `sudo cp`
-in the steps below copies from a checkout of the source repository, so fetch one now.
-The repository URL is the `Home-page` field of the installed package metadata:
+in the steps below copies from a checkout of the source repository, so fetch one now,
+as your own admin user:
 
 ```bash
-pipx runpip mudauth show mudauth | grep '^Home-page:'   # pip show mudauth, if you used pip
-git clone <that URL> ~/mudauth-src                      # or download and unpack the zip
+git clone https://github.com/StickMUD/mudauth.git ~/mudauth-src
 cd ~/mudauth-src
+```
+
+No git? Download and unpack the tarball instead:
+
+```bash
+curl -fsSL https://github.com/StickMUD/mudauth/archive/refs/heads/main.tar.gz \
+  | tar xz -C ~ && cd ~/mudauth-main
 ```
 
 Run the rest of this guide from that directory. Nothing on the host depends on it
@@ -149,7 +162,9 @@ not `Include` it as a vhost of its own.
 - Set `AUTH_SERVICE_URL=http://127.0.0.1:7700` in the game's environment, matching
   `AUTH_BIND`.
 - LDMud games: `pip install "mudauth[ldmud]"` to register the
-  `auth_service_request` efun, then restart the driver so it loads.
+  `auth_service_request` efun, then restart the driver so it loads. It must go into
+  the Python interpreter your driver was built against, not the `mudauth` user's
+  pipx environment — those are separate installs and the efun is loaded by the driver.
 - Everything else: call the endpoints directly. See [integrating.md](integrating.md).
 
 The browser-facing base URL can be **derived automatically**: `GET /auth/providers`
@@ -158,10 +173,14 @@ need no URL configuration of its own.
 
 ## 6. Verify
 
+`pipx install` puts the entry point in the installing user's home, so `mudauth` is on
+the `mudauth` user's `PATH`, not yours. Call it by the absolute path the systemd unit
+uses:
+
 ```bash
-mudauth check --env-file /etc/mudauth/.env    # config + reachability, exit 1 on problems
-curl -fsS https://mud.example/auth/healthz    # public path via the proxy
-curl -fsS http://127.0.0.1:7700/auth/providers # loopback, on the server
+sudo -u mudauth /home/mudauth/.local/bin/mudauth check --env-file /etc/mudauth/.env
+curl -fsS https://mud.example/auth/healthz      # public path via the proxy
+curl -fsS http://127.0.0.1:7700/auth/providers  # loopback, on the server
 ```
 
 `mudauth check` prints the public base and the enabled providers with their callback
