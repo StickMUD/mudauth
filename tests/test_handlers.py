@@ -450,22 +450,23 @@ class HandlerTest(unittest.TestCase):
         # token. That poll is exempt from the binding on header-absence alone
         # and must still retrieve the identity -- this is the deliberate,
         # required backward-compatible path.
-        self.assertIsNone(server._AUTH_SERVICE_TOKEN)
-        nonce = "5c5c5c5c-5555-5555-5555-555555555555"
-        with self._get_with_headers(
-            f"/auth/login/github/{nonce}",
-            {"X-Forwarded-For": "198.51.100.9, 203.0.113.7"},
-        ) as r:
-            state = parse_qs(urlparse(r.headers["Location"]).query)["state"][0]
-        with self._get_with_headers(
-            f"/auth/callback?code=abc&state={state}",
-            {"X-Forwarded-For": "198.51.100.9, 203.0.113.7"},
-        ) as r:
-            self.assertEqual(r.status, 200)
+        with _token(None):
+            self.assertIsNone(server._AUTH_SERVICE_TOKEN)
+            nonce = "5c5c5c5c-5555-5555-5555-555555555555"
+            with self._get_with_headers(
+                f"/auth/login/github/{nonce}",
+                {"X-Forwarded-For": "198.51.100.9, 203.0.113.7"},
+            ) as r:
+                state = parse_qs(urlparse(r.headers["Location"]).query)["state"][0]
+            with self._get_with_headers(
+                f"/auth/callback?code=abc&state={state}",
+                {"X-Forwarded-For": "198.51.100.9, 203.0.113.7"},
+            ) as r:
+                self.assertEqual(r.status, 200)
 
-        status, body = self._get_json(f"/auth/token-poll?nonce={nonce}")
-        self.assertEqual(status, 200)
-        self.assertEqual(body["provider_id"], "42")
+            status, body = self._get_json(f"/auth/token-poll?nonce={nonce}")
+            self.assertEqual(status, 200)
+            self.assertEqual(body["provider_id"], "42")
 
     def test_browser_login_headerless_poll_is_refused_once_a_token_is_configured(self):
         # The other half of the non-regression: once AUTH_SERVICE_TOKEN is
@@ -972,11 +973,13 @@ class ClientIPTest(unittest.TestCase):
 
     def test_takes_the_rightmost_forwarded_element_from_the_proxy(self):
         h = _stub_handler("127.0.0.1", ("X-Forwarded-For", "198.51.100.9, 203.0.113.7"))
-        self.assertEqual(server._client_ip(h), "203.0.113.7")
+        with _hops(1):
+            self.assertEqual(server._client_ip(h), "203.0.113.7")
 
     def test_header_lookup_is_case_insensitive(self):
         h = _stub_handler("127.0.0.1", ("x-forwarded-for", "9.9.9.9, 203.0.113.7"))
-        self.assertEqual(server._client_ip(h), "203.0.113.7")
+        with _hops(1):
+            self.assertEqual(server._client_ip(h), "203.0.113.7")
 
     def test_repeated_forwarded_header_lines_are_one_list(self):
         # A client can send its own X-Forwarded-For line; a proxy may append a
@@ -987,17 +990,20 @@ class ClientIPTest(unittest.TestCase):
             ("X-Forwarded-For", "9.9.9.9"),
             ("X-Forwarded-For", "203.0.113.7"),
         )
-        self.assertEqual(server._client_ip(h), "203.0.113.7")
+        with _hops(1):
+            self.assertEqual(server._client_ip(h), "203.0.113.7")
 
     def test_empty_forwarded_elements_are_skipped(self):
         h = _stub_handler("127.0.0.1", ("X-Forwarded-For", " , , 203.0.113.7"))
-        self.assertEqual(server._client_ip(h), "203.0.113.7")
+        with _hops(1):
+            self.assertEqual(server._client_ip(h), "203.0.113.7")
         h = _stub_handler("127.0.0.1", ("X-Forwarded-For", " , , "))
         self.assertEqual(server._client_ip(h), "127.0.0.1")
 
     def test_ipv6_mapped_loopback_peer_is_loopback(self):
         h = _stub_handler("::ffff:127.0.0.1", ("X-Forwarded-For", "203.0.113.7"))
-        self.assertEqual(server._client_ip(h), "203.0.113.7")
+        with _hops(1):
+            self.assertEqual(server._client_ip(h), "203.0.113.7")
         self.assertTrue(server._is_trusted_loopback(_stub_handler("::ffff:127.0.0.1")))
         self.assertTrue(server._is_trusted_loopback(_stub_handler("::1")))
 
@@ -1009,7 +1015,8 @@ class ClientIPTest(unittest.TestCase):
             ("X-Forwarded-For", "203.0.113.7"),
             ("X-Real-IP", "198.51.100.9"),
         )
-        self.assertEqual(server._client_ip(h), "203.0.113.7")
+        with _hops(1):
+            self.assertEqual(server._client_ip(h), "203.0.113.7")
 
     def test_repeated_real_ip_lines_take_the_last(self):
         # Same reasoning as X-Forwarded-For: if a client's own line survives
@@ -1084,7 +1091,8 @@ class ClientIPTest(unittest.TestCase):
         # reproduce by sending the same garbage back.
         for value in ("unknown", "; DROP", "203.0.113.7:443", "[203.0.113.7]"):
             h = _stub_handler("127.0.0.1", ("X-Forwarded-For", f"9.9.9.9, {value}"))
-            self.assertIsNone(server._client_ip(h), value)
+            with _hops(1):
+                self.assertIsNone(server._client_ip(h), value)
 
     def test_the_request_path_does_not_read_the_environment(self):
         # The hop count is fixed at startup, so an operator editing .env under
@@ -1092,7 +1100,7 @@ class ClientIPTest(unittest.TestCase):
         h = _stub_handler(
             "127.0.0.1", ("X-Forwarded-For", "9.9.9.9, 203.0.113.7, 10.0.0.2")
         )
-        with unittest.mock.patch.dict(os.environ, {"AUTH_TRUSTED_PROXY_HOPS": "2"}):
+        with unittest.mock.patch.dict(os.environ, {"AUTH_TRUSTED_PROXY_HOPS": "2"}), _hops(1):
             self.assertEqual(server._client_ip(h), "10.0.0.2")
 
 
