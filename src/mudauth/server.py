@@ -264,6 +264,18 @@ def _client_ip(handler: BaseHTTPRequestHandler) -> str | None:
     return peer
 
 
+def _lacks_forwarding_headers(handler: BaseHTTPRequestHandler) -> bool:
+    """True when the request carries neither X-Forwarded-For nor X-Real-IP.
+
+    Shared by the legacy exemption rule, the token rule below (which now
+    requires this too -- see _is_trusted_loopback), and the "loopback
+    exemption denied" logging, which must fire only for a genuinely
+    headerless loopback caller rather than for every proxied browser request
+    that simply lacks a valid token, which in production is the common case.
+    """
+    return "X-Forwarded-For" not in handler.headers and "X-Real-IP" not in handler.headers
+
+
 def _is_trusted_loopback(handler: BaseHTTPRequestHandler) -> bool:
     """True only for a direct loopback caller — in practice, the game itself.
 
@@ -273,11 +285,18 @@ def _is_trusted_loopback(handler: BaseHTTPRequestHandler) -> bool:
     When AUTH_SERVICE_TOKEN is configured, the exemption rests on positive
     evidence: a loopback peer presenting that shared secret in
     AUTH_SERVICE_TOKEN_HEADER, compared with hmac.compare_digest since it is a
-    bearer credential. The absence of forwarding headers is no longer
-    sufficient on its own -- a proxy that stops adding them (ProxyAddHeaders
-    Off, a hand-rolled vhost, a different front end) would otherwise make
-    every internet request indistinguishable from the game. A valid token
-    from a non-loopback peer is still refused; both are required.
+    bearer credential -- AND the absence of a forwarding header. The token
+    alone is not enough to grant the exemption: neither shipped reverse-proxy
+    config strips a client-supplied X-Auth-Service-Token, so a caller who has
+    learned the token (from a paste, a log, /proc/<pid>/environ under the
+    same uid) could otherwise present it *through* the proxy and inherit the
+    exemption remotely -- a widening of remote attack surface the legacy
+    header-absence rule never had, since a correctly configured proxy always
+    appends X-Forwarded-For. Requiring both makes the token path a strict
+    tightening of the legacy rule, never a trade against it: the game polls
+    over loopback directly and never traverses a proxy, so it never carries a
+    forwarding header, and this costs it nothing. A valid token from a
+    non-loopback peer is still refused regardless.
 
     When AUTH_SERVICE_TOKEN is unset, today's behavior is unchanged so an
     existing deployment does not break on restart: a request carrying a
@@ -288,15 +307,21 @@ def _is_trusted_loopback(handler: BaseHTTPRequestHandler) -> bool:
     peer = handler.client_address[0] if handler.client_address else None
     if not _is_loopback(peer):
         return False
+    no_forwarding_headers = _lacks_forwarding_headers(handler)
     if _AUTH_SERVICE_TOKEN:
-        supplied = handler.headers.get(AUTH_SERVICE_TOKEN_HEADER) or ""
+        # Exactly one line, like every other credential-bearing check this
+        # service makes: a repeated header is not a value to pick a winner
+        # from, it is the request not looking like what was promised.
+        lines = handler.headers.get_all(AUTH_SERVICE_TOKEN_HEADER) or []
+        supplied = lines[0] if len(lines) == 1 else ""
         # Compare as bytes: compare_digest raises TypeError on non-ASCII str
         # input, and the header is attacker-controlled even on this branch
         # (a loopback caller without the real token is exactly the local
         # process / SSRF this token is meant to keep out) -- a malformed
         # value must fail the check, not crash the request thread.
-        return hmac.compare_digest(supplied.encode(), _AUTH_SERVICE_TOKEN.encode())
-    return "X-Forwarded-For" not in handler.headers and "X-Real-IP" not in handler.headers
+        token_matches = hmac.compare_digest(supplied.encode(), _AUTH_SERVICE_TOKEN.encode())
+        return token_matches and no_forwarding_headers
+    return no_forwarding_headers
 
 
 _UUID_RE = re.compile(
@@ -591,7 +616,7 @@ class AuthHandler(BaseHTTPRequestHandler):
                 recorded = entry.get("origin_ip")
                 claimed = _client_ip(self)
                 peer = self.client_address[0] if self.client_address else None
-                if _AUTH_SERVICE_TOKEN and _is_loopback(peer):
+                if _AUTH_SERVICE_TOKEN and _is_loopback(peer) and _lacks_forwarding_headers(self):
                     _log_rejected_exemption(
                         "token-poll", peer, claimed, recorded, entry.get("provider")
                     )
@@ -622,18 +647,32 @@ class AuthHandler(BaseHTTPRequestHandler):
             return
         # Same shape as the poll: the loopback exemption first, then an
         # explicit reject for anything we cannot vouch for. Cancelling
-        # someone else's completed login is a denial of their sign-in.
+        # someone else's login -- completed OR still pending -- is a denial
+        # of their sign-in, so both are bound to the origin that started
+        # them; a nonce is a client-generated UUID, not a secret, so leaving
+        # the pending half unchecked let anyone who learned it cancel an
+        # in-flight login from anywhere.
         loopback = _is_trusted_loopback(self)
         requester_ip = None if loopback else _client_ip(self)
         peer = self.client_address[0] if self.client_address else None
         cancelled = 0
         with self.flow.lock:
             entry = self.flow.completed.get(nonce)
-            if entry:
-                recorded = entry.get("origin_ip")
-                if not loopback and _AUTH_SERVICE_TOKEN and _is_loopback(peer):
+            pending_states = [
+                s for s, v in self.flow.pending.items() if v.get("login_nonce") == nonce
+            ]
+            if entry or pending_states:
+                # The completed entry's recorded origin wins when both exist
+                # (it cannot, in practice: completion pops the pending state);
+                # otherwise fall back to the first pending state's -- both are
+                # recorded from the same caller at /auth/login time.
+                recorded = entry.get("origin_ip") if entry else None
+                if recorded is None and pending_states:
+                    recorded = self.flow.pending[pending_states[0]].get("origin_ip")
+                provider = entry.get("provider") if entry else None
+                if not loopback and _AUTH_SERVICE_TOKEN and _lacks_forwarding_headers(self):
                     _log_rejected_exemption(
-                        "login-cancel", peer, requester_ip, recorded, entry.get("provider")
+                        "login-cancel", peer, requester_ip, recorded, provider
                     )
                 if not loopback and (
                     not recorded or not requester_ip or requester_ip != recorded
@@ -641,13 +680,14 @@ class AuthHandler(BaseHTTPRequestHandler):
                     print(
                         "[auth][security] login-cancel: origin rejected — "
                         f"peer={peer} claimed={requester_ip} recorded={recorded} "
-                        f"provider={entry.get('provider')}"
+                        f"provider={provider}"
                     )
                     self._json(403, {"error": "forbidden"})
                     return
+            if entry:
                 self.flow.completed.pop(nonce, None)
                 cancelled += 1
-            for st in [s for s, v in self.flow.pending.items() if v.get("login_nonce") == nonce]:
+            for st in pending_states:
                 self.flow.pending.pop(st, None)
                 cancelled += 1
         self._json(200, {"cancelled": cancelled})
@@ -686,7 +726,7 @@ class _ThreadingHTTPServer6(ThreadingHTTPServer):
     address_family = socket.AF_INET6
 
 
-def _start_ipv6_loopback_companion(port: int) -> None:
+def _start_ipv6_loopback_companion(port: int) -> ThreadingHTTPServer | None:
     """Also listen on [::1].
 
     Browsers resolve ``localhost`` to both ``127.0.0.1`` and ``::1`` and often
@@ -694,14 +734,19 @@ def _start_ipv6_loopback_companion(port: int) -> None:
     browser-side ``/auth/login`` and ``/auth/callback`` would hit ``::1`` and be
     refused — breaking the OAuth round-trip even though the MUD's IPv4 polling
     works. This keeps the service loopback-only while covering both families.
+
+    Returns the companion server (or ``None`` if the bind failed) so the
+    caller can shut it down alongside the primary one -- otherwise its
+    listening socket and daemon thread outlive every test that starts one.
     """
     try:
         comp = _ThreadingHTTPServer6(("::1", port), AuthHandler)
     except OSError as exc:
         print(f"[auth] IPv6 loopback companion not started: {exc}")
-        return
+        return None
     threading.Thread(target=comp.serve_forever, daemon=True).start()
     print(f"[auth] also listening on [::1]:{port} (IPv6 loopback)")
+    return comp
 
 
 def make_server(host: str, port: int) -> ThreadingHTTPServer:
@@ -720,8 +765,11 @@ def make_server(host: str, port: int) -> ThreadingHTTPServer:
 
     # When bound to IPv4 loopback, also cover IPv6 loopback so browsers that
     # prefer ::1 for "localhost" can still reach the login/callback endpoints.
+    # Stashed on httpd so a caller (tests, in particular) can shut it down
+    # alongside the primary server instead of leaking its socket and thread.
+    httpd.ipv6_companion = None
     if host in ("127.0.0.1", "localhost"):
-        _start_ipv6_loopback_companion(port)
+        httpd.ipv6_companion = _start_ipv6_loopback_companion(port)
 
     def _janitor() -> None:
         while True:

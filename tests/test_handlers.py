@@ -554,6 +554,49 @@ class HandlerTest(unittest.TestCase):
             except urllib.error.HTTPError as e:
                 self.assertEqual(e.code, 403)
 
+    def test_correct_token_with_a_forwarding_header_is_refused_end_to_end(self):
+        # THE FINDING-1 LIVE PROOF: the deployed topology is peer=loopback
+        # (your own reverse proxy) carrying a forwarding header for every real
+        # browser request. Neither shipped proxy config strips a
+        # client-supplied X-Auth-Service-Token, so before the fix this exact
+        # combination -- the correct token riding through the proxy alongside
+        # X-Forwarded-For -- passed the loopback exemption: a net widening of
+        # remote attack surface, since the legacy rule never granted the
+        # exemption to a header-bearing request at all. A token-bearing,
+        # headerless poll (the real game path) must still succeed.
+        nonce = "5f6f7f8f-5555-5555-5555-555555555555"
+        with self._get_with_headers(
+            f"/auth/login/github/{nonce}",
+            {"X-Forwarded-For": "198.51.100.9, 203.0.113.7"},
+        ) as r:
+            state = parse_qs(urlparse(r.headers["Location"]).query)["state"][0]
+        with self._get_with_headers(
+            f"/auth/callback?code=abc&state={state}",
+            {"X-Forwarded-For": "198.51.100.9, 203.0.113.7"},
+        ) as r:
+            self.assertEqual(r.status, 200)
+
+        with _token("s3cr3t"):
+            try:
+                self._get_json_with_headers(
+                    f"/auth/token-poll?nonce={nonce}",
+                    {
+                        server.AUTH_SERVICE_TOKEN_HEADER: "s3cr3t",
+                        "X-Forwarded-For": "203.0.113.55",
+                    },
+                )
+                self.fail("expected HTTPError 403")
+            except urllib.error.HTTPError as e:
+                self.assertEqual(e.code, 403)
+
+            # The headerless game path is untouched by the tightening.
+            status, body = self._get_json_with_headers(
+                f"/auth/token-poll?nonce={nonce}",
+                {server.AUTH_SERVICE_TOKEN_HEADER: "s3cr3t"},
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(body["provider_id"], "42")
+
     def test_login_cancel_honors_the_token_exemption(self):
         nonce = "5a5b5c5d-5555-5555-5555-555555555555"
         with self._get_with_headers(
@@ -715,6 +758,34 @@ class HandlerTest(unittest.TestCase):
             f"/auth/token-poll?nonce={nonce}", {"X-Forwarded-For": "203.0.113.7"}
         )
         self.assertEqual(status, 200)
+
+    def test_login_cancel_rejects_origin_mismatch_for_a_still_pending_login(self):
+        # The origin binding on cancel must cover a login that has not yet
+        # reached the provider callback too -- a login_nonce is a
+        # client-generated UUID, not a secret, so leaving this half unchecked
+        # let anyone who learned (or guessed) a nonce cancel someone else's
+        # in-flight login from anywhere, with the callback never completing.
+        nonce = "6e6e6e6e-6666-6666-6666-666666666666"
+        proxied = {"X-Forwarded-For": "198.51.100.9, 203.0.113.7"}
+        with self._get_with_headers(f"/auth/login/github/{nonce}", proxied):
+            pass  # deliberately no callback -- the flow stays pending
+
+        try:
+            self._post_json_with_headers(
+                "/auth/login-cancel", {"nonce": nonce},
+                {"X-Forwarded-For": "198.51.100.9, 198.51.100.66"},
+            )
+            self.fail("expected HTTPError 403")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 403)
+
+        # Still pending after the rejected attempt; the real origin can
+        # complete or cancel it.
+        status, body = self._post_json_with_headers(
+            "/auth/login-cancel", {"nonce": nonce}, proxied
+        )
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(body["cancelled"], 1)
 
     def test_responses_carry_the_hardening_headers(self):
         # These pages render on the operator's public MUD origin, and the URLs
@@ -1041,16 +1112,21 @@ class TrustedLoopbackTokenTest(unittest.TestCase):
         h = _stub_handler("127.0.0.1", (server.AUTH_SERVICE_TOKEN_HEADER, "s3cr3t"))
         self.assertTrue(server._is_trusted_loopback(h))
 
-    def test_correct_token_is_trusted_even_alongside_forwarding_headers(self):
-        # Positive evidence is now the whole test; header-absence is no
-        # longer part of the decision once a token is configured.
+    def test_correct_token_is_refused_alongside_forwarding_headers(self):
+        # THE FINDING-1 FIX: neither shipped proxy config strips a
+        # client-supplied X-Auth-Service-Token, so a request that arrives
+        # through the proxy carrying both the correct token AND a forwarding
+        # header is exactly what a remote caller who has learned the token
+        # can send. The token path must be strictly stronger than the legacy
+        # header-absence path, never a trade against it -- so this must be
+        # refused even though the token itself is correct.
         server._AUTH_SERVICE_TOKEN = "s3cr3t"
         h = _stub_handler(
             "127.0.0.1",
             (server.AUTH_SERVICE_TOKEN_HEADER, "s3cr3t"),
             ("X-Forwarded-For", "203.0.113.7"),
         )
-        self.assertTrue(server._is_trusted_loopback(h))
+        self.assertFalse(server._is_trusted_loopback(h))
 
     def test_missing_token_when_configured_is_not_trusted(self):
         server._AUTH_SERVICE_TOKEN = "s3cr3t"
@@ -1060,6 +1136,20 @@ class TrustedLoopbackTokenTest(unittest.TestCase):
     def test_wrong_token_when_configured_is_not_trusted(self):
         server._AUTH_SERVICE_TOKEN = "s3cr3t"
         h = _stub_handler("127.0.0.1", (server.AUTH_SERVICE_TOKEN_HEADER, "wrong"))
+        self.assertFalse(server._is_trusted_loopback(h))
+
+    def test_a_repeated_token_header_is_refused_rather_than_reading_the_first(self):
+        # Every other credential-bearing header this service reads
+        # (X-Forwarded-For, X-Real-IP) treats a repeated line deliberately.
+        # A second X-Auth-Service-Token line is not a value to pick a winner
+        # from -- it means the request does not look like what was promised,
+        # so it must fail closed even when the first line is the real token.
+        server._AUTH_SERVICE_TOKEN = "s3cr3t"
+        h = _stub_handler(
+            "127.0.0.1",
+            (server.AUTH_SERVICE_TOKEN_HEADER, "s3cr3t"),
+            (server.AUTH_SERVICE_TOKEN_HEADER, "s3cr3t"),
+        )
         self.assertFalse(server._is_trusted_loopback(h))
 
     def test_a_non_ascii_token_header_fails_closed_instead_of_raising(self):
@@ -1170,12 +1260,22 @@ class AuthServiceTokenConfigTest(unittest.TestCase):
     @staticmethod
     def _serve_and_close(httpd):
         """shutdown() waits on an event only serve_forever() sets, so a
-        server that never started serving hangs forever on shutdown."""
+        server that never started serving hangs forever on shutdown.
+
+        A 127.0.0.1 bind also starts an IPv6 [::1] companion server
+        (make_server stashes it as httpd.ipv6_companion); leaving that
+        running is a live socket and daemon thread this test never asked
+        for, so it is shut down the same way.
+        """
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
         thread.start()
         httpd.shutdown()
         thread.join()
         httpd.server_close()
+        companion = getattr(httpd, "ipv6_companion", None)
+        if companion is not None:
+            companion.shutdown()
+            companion.server_close()
 
     def test_make_server_warns_on_startup_when_the_token_is_unset(self):
         out = io.StringIO()
