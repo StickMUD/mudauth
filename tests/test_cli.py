@@ -71,6 +71,7 @@ class ServeTest(unittest.TestCase):
                 self.assertEqual(r.status, 200)
         finally:
             httpd.shutdown()
+            httpd.server_close()
 
 
 class VersionTest(unittest.TestCase):
