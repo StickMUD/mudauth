@@ -81,7 +81,20 @@ callers are trusted — the listener must stay on loopback. `X-Forwarded-For` an
 `X-Real-IP` are believed only from a loopback peer (your reverse proxy), and only
 the rightmost `X-Forwarded-For` element — the hop your proxy appended — is read, so
 a caller cannot name its own origin. If two proxies append to the header, set
-`AUTH_TRUSTED_PROXY_HOPS=2`. Report vulnerabilities per [SECURITY.md](SECURITY.md).
+`AUTH_TRUSTED_PROXY_HOPS=2`.
+
+Count the appending proxies exactly. Reading too few hops back binds every login to one
+of your own proxies' addresses instead of the player's; reading too many reads an
+element the client wrote whenever a client pads the header. The value is validated at
+startup — a non-integer or anything below 1 stops the service with a message rather
+than being clamped — and the effective count is printed in the startup banner. When a
+request's forwarding header is not the shape that count promises, or carries something
+that is not an IP address, the service logs an `[auth][security]` line and refuses the
+request; it never falls back to the loopback peer, which would make every origin match.
+
+Both shipped proxy configs turn access logging off for `/auth/`, because the request
+line carries the nonce and the authorization code. Report vulnerabilities per
+[SECURITY.md](SECURITY.md).
 
 ## Test
 

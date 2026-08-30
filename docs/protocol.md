@@ -113,10 +113,18 @@ verifies them; it has no store to keep them in.
   the hop your proxy appended — because everything left of it was written by the
   client. Repeated header lines are read as one list. Set
   `AUTH_TRUSTED_PROXY_HOPS=<n>` if `n` proxies append to the header before it reaches
-  the service; a header with fewer elements than that is discarded and the peer
-  address is used. Note the corollary of the recommended integration: a game that
-  starts the flow over loopback records the loopback address as the origin, so the
-  binding constrains nothing on that path — the nonce is the credential there.
+  the service; it is validated once at startup and a non-integer or a value below 1
+  stops the service rather than being clamped, because a silently degraded binding is
+  worse than a refusal to boot. When a request arrives with a chain shorter than `n`,
+  or with a hop that is not an IP address, the service has no origin it can vouch for:
+  it logs an `[auth][security]` line and **refuses** the request. It does not fall back
+  to the peer address, which on this loopback-only listener is always `127.0.0.1` — the
+  origin a game's own flows record — so that fallback would have made every origin
+  match. A caller whose origin cannot be resolved, or an entry with no recorded origin,
+  is rejected; nothing here fails open. Note the corollary of the recommended
+  integration: a game that starts the flow over loopback records the loopback address
+  as the origin, so the binding constrains nothing on that path — the nonce is the
+  credential there.
 - **Confidential client only:** there is no native-capture or client-driven flow, so
   no PKCE. The `client_secret` is used server-side and never leaves the service.
 - **Secrets:** provider `client_secret`s live only in the service's environment, never
@@ -124,10 +132,16 @@ verifies them; it has no store to keep them in.
 - **Logging:** the service redacts query strings and UUIDs from its own request log,
   because both carry live credentials (`?code=`, `?nonce=`, Steam's signed assertion,
   and the `login_nonce` path segment of `/auth/login/<provider>/<nonce>`). Your
-  reverse proxy is a separate log: nginx's `access_log` and Apache's `CustomLog`
-  record the full request line, so those files *will* contain live nonces and
-  authorization codes for their 10-minute lifetime. Treat them as sensitive, or turn
-  access logging off for the `/auth/` location.
+  reverse proxy keeps a separate log: nginx's `access_log` and Apache's `CustomLog`
+  record the full request line, so those files *would* contain live nonces and
+  authorization codes for their 10-minute lifetime. The shipped nginx config therefore
+  sets `access_log off` inside `location /auth/`, and the Apache snippet carries the
+  `SetEnvIf`/`CustomLog env=!` equivalent for that vhost's `CustomLog`. Security
+  decisions — origin rejections, unusable forwarding headers — are logged with the
+  distinct `[auth][security]` prefix and carry the peer address, the claimed origin,
+  the recorded origin and the provider, so a hijack attempt can be told apart from a
+  player moving from wifi to cellular. The nonce is never logged: it is a live
+  credential.
 - **Passwords:** if the game keeps a password flow alongside this one, it should require
   TLS for it. That is the game's concern; `mudauth` never sees a password.
 
