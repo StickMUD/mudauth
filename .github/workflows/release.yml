@@ -2,8 +2,33 @@ name: release
 on:
   push:
     tags: ["v*"]
+permissions:
+  contents: read
 jobs:
+  # A tag must not publish a red tree, and PyPI versions are permanent and
+  # non-reusable: a tag that disagrees with mudauth.__version__ would either
+  # re-publish an old version or fail at the upload, leaving a GitHub release
+  # pointing at nothing. Both are checked before anything is built.
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ matrix.python }}" }
+      - run: pip install -e ".[dev]"
+      - name: Tag matches mudauth.__version__
+        run: |
+          version=$(python -c 'import mudauth; print(mudauth.__version__)')
+          tag="${GITHUB_REF_NAME#v}"
+          echo "tag $GITHUB_REF_NAME -> $tag, package version $version"
+          test "$tag" = "$version"
+      - run: ruff check src tests
+      - run: python -m unittest discover -s tests -v
   build:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
