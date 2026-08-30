@@ -74,6 +74,7 @@ class HandlerTest(unittest.TestCase):
         else:
             del providers.verify_steam_assertion
         cls.httpd.shutdown()
+        cls.httpd.server_close()
 
     def _get(self, path):
         return _opener().open(self.base + path)

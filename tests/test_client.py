@@ -35,6 +35,7 @@ class ClientTest(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.httpd.shutdown()
+        cls.httpd.server_close()
 
     def test_get_returns_status_and_body(self):
         r = client.request("GET", "/auth/healthz", base_url=self.base)
