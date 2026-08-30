@@ -496,20 +496,3 @@ def make_server(host: str, port: int) -> ThreadingHTTPServer:
         f"providers: {sorted(configs.keys()) or '(none configured)'}"
     )
     return httpd
-
-
-def main() -> None:
-    bind = os.environ.get("AUTH_BIND", "127.0.0.1:7700")
-    host, _, port_s = bind.rpartition(":")
-    host = host or "127.0.0.1"
-    port = int(port_s or "7700")
-    httpd = make_server(host, port)
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        print("[auth] shutting down")
-        httpd.shutdown()
-
-
-if __name__ == "__main__":
-    main()
