@@ -31,9 +31,22 @@ def load_env_file(path: str) -> dict[str, str]:
 
 
 def _apply_env_file(args: argparse.Namespace) -> None:
-    if getattr(args, "env_file", None):
-        for k, v in load_env_file(args.env_file).items():
-            os.environ.setdefault(k, v)
+    """Load ``--env-file`` into the environment, if given.
+
+    Raises ``ValueError`` -- the same "configuration error" treatment as a
+    bad AUTH_BIND or hop count -- when the file cannot be opened at all
+    (missing, a directory, unreadable, a broken symlink, ...). A malformed
+    *line* inside a file that did open is not this function's concern:
+    load_env_file already tolerates that by skipping the line.
+    """
+    if not getattr(args, "env_file", None):
+        return
+    try:
+        env = load_env_file(args.env_file)
+    except OSError as exc:
+        raise ValueError(f"cannot read --env-file {args.env_file}: {exc}") from None
+    for k, v in env.items():
+        os.environ.setdefault(k, v)
 
 
 def _is_local_host(host: str) -> bool:
@@ -63,7 +76,11 @@ def build_server_from_env():
 
 
 def serve(args: argparse.Namespace) -> int:
-    _apply_env_file(args)
+    try:
+        _apply_env_file(args)
+    except ValueError as exc:
+        print(f"[auth] configuration error: {exc}", file=sys.stderr)
+        return 2
     if args.bind:
         os.environ["AUTH_BIND"] = args.bind
     try:
@@ -95,7 +112,11 @@ def _service_url() -> str:
 
 
 def check(args: argparse.Namespace) -> int:
-    _apply_env_file(args)
+    try:
+        _apply_env_file(args)
+    except ValueError as exc:
+        print(f"[auth] configuration error: {exc}", file=sys.stderr)
+        return 2
     problems = 0
     base = server._public_base()
     print(f"AUTH_PUBLIC_BASE: {base}")

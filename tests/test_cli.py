@@ -1,3 +1,4 @@
+import argparse
 import contextlib
 import io
 import os
@@ -6,6 +7,10 @@ import unittest
 import unittest.mock
 
 from mudauth import cli
+
+
+def _running_as_root():
+    return hasattr(os, "geteuid") and os.geteuid() == 0
 
 
 class EnvFileTest(unittest.TestCase):
@@ -27,6 +32,121 @@ class EnvFileTest(unittest.TestCase):
 
     def test_keeps_trailing_hash_inside_value(self):
         self.assertEqual(self._load("A=ab#c\n")["A"], "ab#c")
+
+
+class UnusableEnvFileTest(unittest.TestCase):
+    """A missing/unreadable --env-file must fail like any other bad config:
+
+    ``[auth] configuration error: ...`` on stderr and exit 2 -- not a raw
+    traceback -- for both `serve` and `check`.
+    """
+
+    def _run(self, cmd, path):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = cli.main([cmd, "--env-file", path])
+        return rc, err.getvalue()
+
+    def test_serve_reports_missing_env_file(self):
+        rc, err = self._run("serve", "/nonexistent/mudauth.env")
+        self.assertEqual(rc, 2)
+        self.assertIn("[auth] configuration error:", err)
+        self.assertIn("/nonexistent/mudauth.env", err)
+
+    def test_check_reports_missing_env_file(self):
+        rc, err = self._run("check", "/nonexistent/mudauth.env")
+        self.assertEqual(rc, 2)
+        self.assertIn("[auth] configuration error:", err)
+        self.assertIn("/nonexistent/mudauth.env", err)
+
+    def test_serve_reports_env_file_that_is_a_directory(self):
+        with tempfile.TemporaryDirectory() as d:
+            rc, err = self._run("serve", d)
+        self.assertEqual(rc, 2)
+        self.assertIn("[auth] configuration error:", err)
+        self.assertIn(d, err)
+
+    def test_check_reports_env_file_that_is_a_directory(self):
+        with tempfile.TemporaryDirectory() as d:
+            rc, err = self._run("check", d)
+        self.assertEqual(rc, 2)
+        self.assertIn("[auth] configuration error:", err)
+        self.assertIn(d, err)
+
+    @unittest.skipIf(_running_as_root(), "permission bits are not enforced for root")
+    def test_serve_reports_unreadable_env_file(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False) as fh:
+            fh.write("A=b\n")
+            path = fh.name
+        try:
+            os.chmod(path, 0o000)
+            rc, err = self._run("serve", path)
+            self.assertEqual(rc, 2)
+            self.assertIn("[auth] configuration error:", err)
+            self.assertIn(path, err)
+        finally:
+            os.chmod(path, 0o644)
+            os.unlink(path)
+
+    @unittest.skipIf(_running_as_root(), "permission bits are not enforced for root")
+    def test_check_reports_unreadable_env_file(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False) as fh:
+            fh.write("A=b\n")
+            path = fh.name
+        try:
+            os.chmod(path, 0o000)
+            rc, err = self._run("check", path)
+            self.assertEqual(rc, 2)
+            self.assertIn("[auth] configuration error:", err)
+            self.assertIn(path, err)
+        finally:
+            os.chmod(path, 0o644)
+            os.unlink(path)
+
+    def test_apply_env_file_loads_a_readable_file(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False) as fh:
+            fh.write("MUDAUTH_TEST_VAR=hello\n")
+            path = fh.name
+        try:
+            with unittest.mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("MUDAUTH_TEST_VAR", None)
+                cli._apply_env_file(argparse.Namespace(env_file=path))
+                self.assertEqual(os.environ.get("MUDAUTH_TEST_VAR"), "hello")
+        finally:
+            os.unlink(path)
+
+    def test_check_still_works_with_a_readable_env_file(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False) as fh:
+            fh.write("AUTH_PUBLIC_BASE=https://mud.example\nDISCORD_CLIENT_ID=i\nDISCORD_CLIENT_SECRET=s\n")
+            path = fh.name
+        out = io.StringIO()
+        try:
+            with unittest.mock.patch.dict(os.environ, {}, clear=True), contextlib.redirect_stdout(out), \
+                 unittest.mock.patch("mudauth.client.request", return_value={"status": 200, "body": "{}"}):
+                rc = cli.main(["check", "--env-file", path])
+            self.assertEqual(rc, 0)
+            self.assertIn("https://mud.example", out.getvalue())
+        finally:
+            os.unlink(path)
+
+    def test_serve_still_works_with_a_readable_env_file(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False) as fh:
+            fh.write("AUTH_BIND=127.0.0.1:0\n")
+            path = fh.name
+        try:
+            with unittest.mock.patch.dict(os.environ, {}, clear=True):
+                args = argparse.Namespace(env_file=path, bind=None)
+                cli._apply_env_file(args)
+                httpd = cli.build_server_from_env()
+            try:
+                self.assertEqual(httpd.server_address[0], "127.0.0.1")
+            finally:
+                httpd.server_close()
+                companion = getattr(httpd, "ipv6_companion", None)
+                if companion is not None:
+                    companion.server_close()
+        finally:
+            os.unlink(path)
 
 
 class CheckTest(unittest.TestCase):
