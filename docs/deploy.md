@@ -225,7 +225,10 @@ instance. Do not `Include` it as a vhost of its own.
 - LDMud games: `pip install "mudauth[ldmud]"` to register the
   `auth_service_request` efun, then restart the driver so it loads. It must go into
   the Python interpreter your driver was built against, not the `mudauth` user's
-  pipx environment — those are separate installs and the efun is loaded by the driver.
+  pipx environment — those are separate installs and the efun is loaded by the driver,
+  and an isolated pipx venv is invisible to it. A plain `pip install --user` targeting
+  that interpreter is the usual choice; add `--break-system-packages` on Debian 12+
+  (PEP 668) — it only affects the user site. See [integrating.md](integrating.md#ldmud).
 - Everything else: call the endpoints directly. See [integrating.md](integrating.md).
 
 The browser-facing base URL can be **derived automatically**: `GET /auth/providers`
