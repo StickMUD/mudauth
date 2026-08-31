@@ -42,13 +42,16 @@ as your own admin user:
 ```bash
 git clone https://github.com/StickMUD/mudauth.git ~/mudauth-src
 cd ~/mudauth-src
+# Match the support files to the version pipx installed -- main may be ahead.
+git checkout "v$(mudauth --version | cut -d' ' -f2)"
 ```
 
 No git? Download and unpack the tarball instead:
 
 ```bash
-curl -fsSL https://github.com/StickMUD/mudauth/archive/refs/heads/main.tar.gz \
-  | tar xz -C ~ && cd ~/mudauth-main
+ver="$(mudauth --version | cut -d' ' -f2)"
+curl -fsSL "https://github.com/StickMUD/mudauth/archive/refs/tags/v${ver}.tar.gz" \
+  | tar xz -C ~ && cd ~/"mudauth-${ver}"
 ```
 
 Run the rest of this guide from that directory. Nothing on the host depends on it
