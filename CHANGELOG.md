@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-11-27
 
 - Improve: the browser page players see after signing in is redesigned for
   phones and desktops, follows the browser's light or dark setting, and

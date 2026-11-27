@@ -980,13 +980,21 @@ class BrandNameTest(unittest.TestCase):
             self.assertNotIn("<script>", page)
 
     def test_urls_need_a_host_and_no_whitespace(self):
-        for url in ("https:///x", "https://bob.example/a\nb", "https://bob example/"):
+        for url in (
+            "https:///x",
+            "https://:443/logo.png",
+            "https://bob.example:99999/",
+            "https://bob.example:abc/",
+            "https://bob.example/a\nb",
+            "https://bob example/",
+        ):
             with self._brand_env({"AUTH_BRAND_URL": url}):
                 b, problems = server.brand()
             self.assertEqual(b["url"], "", url)
             self.assertEqual(len(problems), 1, url)
-        with self._brand_env({"AUTH_BRAND_URL": "http://bob.example/"}):
-            self.assertEqual(server.brand()[0]["url"], "http://bob.example/")
+        for url in ("http://bob.example/", "https://bob.example:8443/"):
+            with self._brand_env({"AUTH_BRAND_URL": url}):
+                self.assertEqual(server.brand()[0]["url"], url)
 
     def test_values_that_are_not_utf8_are_ignored(self):
         # os.environ hands non-UTF-8 bytes over as lone surrogates, which

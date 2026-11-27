@@ -115,12 +115,13 @@ def _brand_env_url(name: str, schemes: tuple[str, ...]) -> tuple[str, str | None
         return "", f"{name} is not valid UTF-8; ignoring {raw!r}"
     try:
         parts = urlparse(raw)
+        _ = parts.port  # raises ValueError on a port that is not a number or out of range
     except ValueError:
         parts = None
     if (
         parts is None
         or parts.scheme not in schemes
-        or not parts.netloc
+        or not parts.hostname
         or any(c.isspace() or ord(c) < 32 for c in raw)
     ):
         wanted = " or ".join(f"{s}://" for s in schemes)
