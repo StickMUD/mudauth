@@ -49,6 +49,13 @@ service requires it (read at call time, so no particular process start order is
 needed relative to the environment). Restart the driver after installing; efuns load
 at start.
 
+The package must go into the interpreter the **driver's own embedded Python**
+imports from — an isolated installer such as pipx will not serve the efun even
+though it works fine for running the service itself (see [deploy.md](deploy.md)).
+A plain `pip install --user "mudauth[ldmud]"` targeting that interpreter is the
+usual choice; on Debian 12+ (PEP 668) add `--break-system-packages`, which only
+affects the user site.
+
 ## Anything with an HTTP client (Evennia, Node, Go, ...)
 
 Call the endpoints directly. `mudauth.client.request()` is a thin `urllib` wrapper

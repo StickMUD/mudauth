@@ -226,6 +226,9 @@ class HandlerTest(unittest.TestCase):
         # 3. simulate the provider redirect to the callback
         with self._get(f"/auth/callback?code=abc&state={state}") as r:
             self.assertEqual(r.status, 200)
+            page = r.read().decode()
+        self.assertIn('<main class="ok">', page)
+        self.assertIn("You&#x27;re signed in", page)
 
         # 4. poll now returns the verified identity (one-time)
         status, body = self._get_json(f"/auth/token-poll?nonce={nonce}")
@@ -322,7 +325,10 @@ class HandlerTest(unittest.TestCase):
             self.fail("expected HTTPError 400")
         except urllib.error.HTTPError as e:
             self.assertEqual(e.code, 400)
-            self.assertIn("declined", e.read().decode())
+            page = e.read().decode()
+            self.assertIn("declined", page)
+            self.assertIn('<main class="bad">', page)
+            self.assertIn("<h1>Sign-in cancelled</h1>", page)
 
     def test_concurrent_polls_yield_identity_once(self):
         # The check-and-pop is meant to be atomic: many simultaneous polls of the
@@ -897,21 +903,118 @@ class ConfigTest(unittest.TestCase):
 
 
 class BrandNameTest(unittest.TestCase):
-    def test_done_page_defaults_to_mudauth(self):
-        with unittest.mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("AUTH_BRAND_NAME", None)
-            page = server._done_page("ok")
-            self.assertIn("<title>mudauth</title>", page)
-            self.assertIn("<h1>mudauth</h1>", page)
+    _BRAND_VARS = ("AUTH_BRAND_NAME", "AUTH_BRAND_URL", "AUTH_BRAND_LOGO_URL", "AUTH_BRAND_ACCENT")
 
-    def test_done_page_uses_brand_env(self):
-        with unittest.mock.patch.dict(os.environ, {"AUTH_BRAND_NAME": "Realm of Bob"}):
-            page = server._done_page("ok")
-            self.assertIn("<h1>Realm of Bob</h1>", page)
+    def _brand_env(self, env):
+        clean = {k: v for k, v in os.environ.items() if k not in self._BRAND_VARS}
+        return unittest.mock.patch.dict(os.environ, {**clean, **env}, clear=True)
 
-    def test_done_page_escapes_brand(self):
-        with unittest.mock.patch.dict(os.environ, {"AUTH_BRAND_NAME": "<b>x</b>"}):
-            self.assertIn("&lt;b&gt;x&lt;/b&gt;", server._done_page("ok"))
+    def _page(self, env, ok=True, title="Signed in", message="ok"):
+        with self._brand_env(env):
+            return server._page(title, message, ok)
+
+    def test_page_defaults_to_mudauth(self):
+        page = self._page({})
+        self.assertIn("<title>Signed in – mudauth</title>", page)
+        self.assertIn('<p class="brand">mudauth</p>', page)
+        self.assertIn(f"--accent:{server.DEFAULT_BRAND_ACCENT}", page)
+        # No logo: the brand's initial stands in, and nothing is fetched.
+        self.assertIn('<span class="mono" aria-hidden="true">M</span>', page)
+        self.assertNotIn("<img", page)
+        self.assertNotIn('rel="icon"', page)
+        self.assertNotIn('class="visit"', page)
+
+    def test_page_uses_brand_env(self):
+        page = self._page({
+            "AUTH_BRAND_NAME": "Realm of Bob",
+            "AUTH_BRAND_URL": "https://bob.example/",
+            "AUTH_BRAND_LOGO_URL": "https://bob.example/logo.png",
+            "AUTH_BRAND_ACCENT": "#fd9d32",
+        })
+        self.assertIn('<p class="brand">Realm of Bob</p>', page)
+        self.assertIn('<img src="https://bob.example/logo.png" alt=""', page)
+        self.assertIn('<link rel="icon" href="https://bob.example/logo.png">', page)
+        self.assertIn('href="https://bob.example/">Visit the Realm of Bob website</a>', page)
+        self.assertIn("--accent:#fd9d32", page)
+
+    def test_page_treats_a_blank_name_as_unset(self):
+        page = self._page({"AUTH_BRAND_NAME": "   "})
+        self.assertIn('<p class="brand">mudauth</p>', page)
+        self.assertIn('<span class="mono" aria-hidden="true">M</span>', page)
+
+    def test_page_escapes_brand(self):
+        page = self._page({
+            "AUTH_BRAND_NAME": "<b>x</b>",
+            "AUTH_BRAND_URL": 'https://bob.example/?a="><script>',
+            "AUTH_BRAND_LOGO_URL": 'https://bob.example/l.png?"onerror=x',
+        })
+        self.assertIn("&lt;b&gt;x&lt;/b&gt;", page)
+        self.assertNotIn("<b>x</b>", page)
+        self.assertNotIn("<script>", page)
+        self.assertNotIn('"onerror', page)
+
+    def test_page_ignores_unusable_brand_settings(self):
+        env = {
+            "AUTH_BRAND_URL": "javascript:alert(1)",
+            "AUTH_BRAND_LOGO_URL": "http://bob.example/logo.png",
+            "AUTH_BRAND_ACCENT": "red;}body{display:none",
+        }
+        page = self._page(env)
+        self.assertNotIn("javascript:", page)
+        self.assertNotIn("<img", page)
+        self.assertNotIn("display:none", page)
+        self.assertIn(f"--accent:{server.DEFAULT_BRAND_ACCENT}", page)
+        with self._brand_env(env):
+            _, problems = server.brand()
+        self.assertEqual(len(problems), 3, problems)
+
+    def test_accent_must_be_exactly_a_hex_color(self):
+        # The accent is the one value written into <style> unescaped, so the
+        # whole string has to match, not just a valid-looking prefix.
+        for accent in ("#fff;}</style><script>x", "#ffff", "fd9d32"):
+            with self._brand_env({"AUTH_BRAND_ACCENT": accent}):
+                b, problems = server.brand()
+                page = server._page("t", "m", True)
+            self.assertEqual(b["accent"], server.DEFAULT_BRAND_ACCENT, accent)
+            self.assertEqual(len(problems), 1, accent)
+            self.assertNotIn("<script>", page)
+
+    def test_urls_need_a_host_and_no_whitespace(self):
+        for url in (
+            "https:///x",
+            "https://:443/logo.png",
+            "https://bob.example:99999/",
+            "https://bob.example:abc/",
+            "https://bob.example/a\nb",
+            "https://bob example/",
+        ):
+            with self._brand_env({"AUTH_BRAND_URL": url}):
+                b, problems = server.brand()
+            self.assertEqual(b["url"], "", url)
+            self.assertEqual(len(problems), 1, url)
+        for url in ("http://bob.example/", "https://bob.example:8443/"):
+            with self._brand_env({"AUTH_BRAND_URL": url}):
+                self.assertEqual(server.brand()[0]["url"], url)
+
+    def test_values_that_are_not_utf8_are_ignored(self):
+        # os.environ hands non-UTF-8 bytes over as lone surrogates, which
+        # would make encoding every page fail.
+        env = {
+            "AUTH_BRAND_NAME": "Caf\udce9",
+            "AUTH_BRAND_URL": "https://bob.example/\udce9",
+            "AUTH_BRAND_LOGO_URL": "https://bob.example/\udce9.png",
+        }
+        with self._brand_env(env):
+            b, problems = server.brand()
+            page = server._page("t", "m", True)
+        self.assertEqual((b["name"], b["url"], b["logo"]), ("mudauth", "", ""))
+        self.assertEqual(len(problems), 3, problems)
+        page.encode("utf-8")
+        "\n".join(problems).encode("utf-8")
+
+    def test_page_marks_success_and_failure(self):
+        self.assertIn('<main class="ok">', self._page({}, ok=True))
+        self.assertIn('<main class="bad">', self._page({}, ok=False))
 
 
 class LogRedactionTest(unittest.TestCase):
@@ -1353,6 +1456,18 @@ class AuthServiceTokenConfigTest(unittest.TestCase):
         try:
             self.assertIn("AUTH_SERVICE_TOKEN is not set", out.getvalue())
             self.assertIn("NOT SET", out.getvalue())
+        finally:
+            self._serve_and_close(httpd)
+
+    def test_make_server_logs_unusable_branding(self):
+        out = io.StringIO()
+        with (
+            unittest.mock.patch.dict(os.environ, {"AUTH_BRAND_ACCENT": "orange"}),
+            contextlib.redirect_stdout(out),
+        ):
+            httpd = server.make_server("127.0.0.1", 0)
+        try:
+            self.assertIn("AUTH_BRAND_ACCENT must be", out.getvalue())
         finally:
             self._serve_and_close(httpd)
 

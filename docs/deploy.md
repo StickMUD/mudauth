@@ -225,7 +225,10 @@ instance. Do not `Include` it as a vhost of its own.
 - LDMud games: `pip install "mudauth[ldmud]"` to register the
   `auth_service_request` efun, then restart the driver so it loads. It must go into
   the Python interpreter your driver was built against, not the `mudauth` user's
-  pipx environment — those are separate installs and the efun is loaded by the driver.
+  pipx environment — those are separate installs and the efun is loaded by the driver,
+  and an isolated pipx venv is invisible to it. A plain `pip install --user` targeting
+  that interpreter is the usual choice; add `--break-system-packages` on Debian 12+
+  (PEP 668) — it only affects the user site. See [integrating.md](integrating.md#ldmud).
 - Everything else: call the endpoints directly. See [integrating.md](integrating.md).
 
 The browser-facing base URL can be **derived automatically**: `GET /auth/providers`
@@ -318,7 +321,9 @@ with their callback URLs. It warns about:
 - an `AUTH_BIND` that is not a loopback address — the listener has no authentication
   of its own and must sit behind your proxy;
 - no provider configured at all, which is an install nobody can sign in to;
-- any provider with only one of its two credentials set.
+- any provider with only one of its two credentials set;
+- an `AUTH_BRAND_URL`, `AUTH_BRAND_LOGO_URL` or `AUTH_BRAND_ACCENT` that is set
+  but unusable, which the browser page ignores.
 
 It also reports `AUTH_SERVICE_TOKEN: configured` or `AUTH_SERVICE_TOKEN: not set` —
 informational, not a problem it counts, since unset is a supported default — so you

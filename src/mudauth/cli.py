@@ -158,6 +158,12 @@ def check(args: argparse.Namespace) -> int:
     else:
         print("AUTH_SERVICE_TOKEN: not set — the loopback exemption falls back to "
               "peer + absent forwarding headers; see docs/deploy.md")
+    brand, brand_problems = server.brand()
+    print(f"browser page: {brand['name']}, accent {brand['accent']}, "
+          f"logo {brand['logo'] or '(none)'}, link {brand['url'] or '(none)'}")
+    for problem in brand_problems:
+        print(f"  WARNING: {problem}")
+        problems += 1
     configs = server._load_provider_configs()
     enabled = sorted(configs)
     print(f"providers enabled: {', '.join(enabled) or '(none)'}")
