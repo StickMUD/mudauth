@@ -108,6 +108,12 @@ def _brand_env_url(name: str, schemes: tuple[str, ...]) -> tuple[str, str | None
     if not raw:
         return "", None
     try:
+        # os.environ carries bytes that are not UTF-8 as lone surrogates,
+        # which would make every page fail to encode.
+        raw.encode("utf-8")
+    except UnicodeEncodeError:
+        return "", f"{name} is not valid UTF-8; ignoring {raw!r}"
+    try:
         parts = urlparse(raw)
     except ValueError:
         parts = None
@@ -128,6 +134,12 @@ def brand() -> tuple[dict[str, str], list[str]]:
     back to the default for that setting, and ``mudauth check`` and the
     startup log name it."""
     problems = []
+    name = brand_name()
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError:
+        problems.append(f"AUTH_BRAND_NAME is not valid UTF-8; ignoring {name!r}")
+        name = "mudauth"
     url, problem = _brand_env_url("AUTH_BRAND_URL", ("https", "http"))
     if problem:
         problems.append(problem)
@@ -136,13 +148,11 @@ def brand() -> tuple[dict[str, str], list[str]]:
     logo, problem = _brand_env_url("AUTH_BRAND_LOGO_URL", ("https",))
     if problem:
         problems.append(problem)
-    accent = (os.environ.get("AUTH_BRAND_ACCENT") or "").strip()
-    if not accent:
-        accent = DEFAULT_BRAND_ACCENT
-    elif not _HEX_COLOR_RE.fullmatch(accent):
+    accent = (os.environ.get("AUTH_BRAND_ACCENT") or "").strip() or DEFAULT_BRAND_ACCENT
+    if not _HEX_COLOR_RE.fullmatch(accent):
         problems.append(f"AUTH_BRAND_ACCENT must be a #rgb or #rrggbb color; ignoring {accent!r}")
         accent = DEFAULT_BRAND_ACCENT
-    return {"name": brand_name(), "url": url, "logo": logo, "accent": accent}, problems
+    return {"name": name, "url": url, "logo": logo, "accent": accent}, problems
 
 
 # ── Diagnostics ───────────────────────────────────────────────────────────────
@@ -874,12 +884,14 @@ def _page(title: str, message_html: str, ok: bool) -> str:
     markup: callers escape anything they interpolate into it."""
     b, _ = brand()
     name = html.escape(b["name"])
+    title = html.escape(title)
+    state, badge = ("ok", _CHECK_SVG) if ok else ("bad", _CROSS_SVG)
     if b["logo"]:
         logo = html.escape(b["logo"])
         mark = f"<img src=\"{logo}\" alt=\"\" width=\"76\" height=\"76\">"
         icon = f"<link rel=\"icon\" href=\"{logo}\">"
     else:
-        mark = f"<span class=\"mono\" aria-hidden=\"true\">{html.escape(b['name'].strip()[:1].upper())}</span>"
+        mark = f"<span class=\"mono\" aria-hidden=\"true\">{html.escape(b['name'][:1].upper())}</span>"
         icon = ""
     visit = ""
     if b["url"]:
@@ -890,11 +902,11 @@ def _page(title: str, message_html: str, ok: bool) -> str:
         "<meta name=\"robots\" content=\"noindex\">"
         "<meta name=\"theme-color\" content=\"#e8eaee\" media=\"(prefers-color-scheme: light)\">"
         "<meta name=\"theme-color\" content=\"#141519\" media=\"(prefers-color-scheme: dark)\">"
-        f"<title>{html.escape(title)} – {name}</title>{icon}"
+        f"<title>{title} – {name}</title>{icon}"
         f"<style>:root{{--accent:{b['accent']}}}{_PAGE_CSS}</style></head>"
-        f"<body><main class=\"{'ok' if ok else 'bad'}\">"
-        f"<div class=\"seal\">{mark}<span class=\"badge\">{_CHECK_SVG if ok else _CROSS_SVG}</span></div>"
-        f"<p class=\"brand\">{name}</p><h1>{html.escape(title)}</h1>"
+        f"<body><main class=\"{state}\">"
+        f"<div class=\"seal\">{mark}<span class=\"badge\">{badge}</span></div>"
+        f"<p class=\"brand\">{name}</p><h1>{title}</h1>"
         f"<p class=\"msg\">{message_html}</p>{visit}</main></body></html>"
     )
 

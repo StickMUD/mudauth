@@ -321,7 +321,9 @@ with their callback URLs. It warns about:
 - an `AUTH_BIND` that is not a loopback address — the listener has no authentication
   of its own and must sit behind your proxy;
 - no provider configured at all, which is an install nobody can sign in to;
-- any provider with only one of its two credentials set.
+- any provider with only one of its two credentials set;
+- an `AUTH_BRAND_URL`, `AUTH_BRAND_LOGO_URL` or `AUTH_BRAND_ACCENT` that is set
+  but unusable, which the browser page ignores.
 
 It also reports `AUTH_SERVICE_TOKEN: configured` or `AUTH_SERVICE_TOKEN: not set` —
 informational, not a problem it counts, since unset is a supported default — so you
