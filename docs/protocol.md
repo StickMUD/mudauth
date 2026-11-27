@@ -232,10 +232,10 @@ inside `return_to`.
 
 | Status | Body | Trigger |
 |--------|------|---------|
-| 200 | branded "Authentication successful" page | Identity verified; stored under the nonce for one retrieval |
-| 400 | "You declined the sign-in request…" page | Provider reported `error=access_denied`, or Steam reported `openid.mode=cancel` |
-| 400 | "Authentication failed. Please try again." page | `state` missing, unknown, or already consumed; `state` older than the 10-minute TTL; provider returned any other `error`; `code` missing; token exchange failed; Steam assertion failed verification |
-| 502 | `Could not fetch your <Provider> profile.` | Token accepted, but the provider's profile endpoint failed or returned nothing usable |
+| 200 | branded "You're signed in" page | Identity verified; stored under the nonce for one retrieval |
+| 400 | "Sign-in cancelled" page: "You declined the sign-in request…" | Provider reported `error=access_denied`, or Steam reported `openid.mode=cancel` |
+| 400 | "Sign-in failed" page: "The sign-in did not complete…" | `state` missing, unknown, or already consumed; `state` older than the 10-minute TTL; provider returned any other `error`; `code` missing; token exchange failed; Steam assertion failed verification |
+| 502 | "Sign-in failed" page: `Could not fetch your <Provider> profile.…` | Token accepted, but the provider's profile endpoint failed or returned nothing usable |
 | 503 | `Provider '<p>' is no longer configured.` | The flow started while the provider was configured, but its credentials are gone now (the process was restarted with a different environment) |
 
 The message the player sees is deliberately generic. The specific cause is written

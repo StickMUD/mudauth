@@ -928,6 +928,11 @@ class BrandNameTest(unittest.TestCase):
         self.assertIn('href="https://bob.example/">Visit the Realm of Bob website</a>', page)
         self.assertIn("--accent:#fd9d32", page)
 
+    def test_page_treats_a_blank_name_as_unset(self):
+        page = self._page({"AUTH_BRAND_NAME": "   "})
+        self.assertIn('<p class="brand">mudauth</p>', page)
+        self.assertIn('<span class="mono" aria-hidden="true">M</span>', page)
+
     def test_page_escapes_brand(self):
         page = self._page({
             "AUTH_BRAND_NAME": "<b>x</b>",

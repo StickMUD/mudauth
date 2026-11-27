@@ -93,8 +93,8 @@ def _public_base() -> str:
 
 
 def brand_name() -> str:
-    """Name shown on the browser 'you may close this tab' page."""
-    return os.environ.get("AUTH_BRAND_NAME") or "mudauth"
+    """Name shown on the browser page after sign-in."""
+    return (os.environ.get("AUTH_BRAND_NAME") or "").strip() or "mudauth"
 
 
 DEFAULT_BRAND_ACCENT = "#4f8fd8"
