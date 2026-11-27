@@ -60,7 +60,10 @@ All settings are environment variables; `--env-file` loads a `KEY=VALUE` file.
 | `AUTH_BIND` | `127.0.0.1:7700` | Loopback listener. Never expose it. |
 | `AUTH_PUBLIC_BASE` | `http://localhost:7700` | Browser-facing prefix *before* `/auth/*` |
 | `AUTH_CALLBACK_URL` | `$AUTH_PUBLIC_BASE/auth/callback` | Redirect URI registered with each provider |
-| `AUTH_BRAND_NAME` | `mudauth` | Name on the "you may close this tab" page |
+| `AUTH_BRAND_NAME` | `mudauth` | Name on the browser page players see after signing in |
+| `AUTH_BRAND_URL` | unset | Your game's website; the browser page links to it |
+| `AUTH_BRAND_LOGO_URL` | unset | `https://` image shown in the page's emblem and as its tab icon; without it, the name's first letter stands in |
+| `AUTH_BRAND_ACCENT` | `#4f8fd8` | `#rgb` or `#rrggbb` color for the emblem ring and focus outlines |
 | `AUTH_TRUSTED_PROXY_HOPS` | `1` | Proxies that append to `X-Forwarded-For` between the browser and the service |
 | `AUTH_SERVICE_TOKEN` | unset | Shared secret identifying the game to the loopback exemption; set the *same* value in the game's environment. Recommended — see [docs/deploy.md](docs/deploy.md) for the migration order. |
 | `AUTH_USER_AGENT` | `mudauth/<version>` | Outbound User-Agent; set it to name your game |

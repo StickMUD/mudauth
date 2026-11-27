@@ -226,6 +226,24 @@ class CheckTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("AUTH_SERVICE_TOKEN: not set", out)
 
+    def test_reports_the_browser_page_branding(self):
+        env = {"AUTH_PUBLIC_BASE": "https://mud.example", "DISCORD_CLIENT_ID": "i",
+               "DISCORD_CLIENT_SECRET": "s", "AUTH_BRAND_NAME": "Realm of Bob",
+               "AUTH_BRAND_LOGO_URL": "https://bob.example/logo.png"}
+        rc, out = self._check(env)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("browser page: Realm of Bob", out)
+        self.assertIn("logo https://bob.example/logo.png", out)
+
+    def test_warns_about_unusable_branding(self):
+        env = {"AUTH_PUBLIC_BASE": "https://mud.example", "DISCORD_CLIENT_ID": "i",
+               "DISCORD_CLIENT_SECRET": "s", "AUTH_BRAND_ACCENT": "orange",
+               "AUTH_BRAND_LOGO_URL": "http://bob.example/logo.png"}
+        rc, out = self._check(env)
+        self.assertEqual(rc, 1)
+        self.assertIn("AUTH_BRAND_ACCENT must be", out)
+        self.assertIn("AUTH_BRAND_LOGO_URL must be a https:// URL", out)
+
     def test_reports_auth_service_token_configured_without_leaking_it(self):
         env = {"AUTH_PUBLIC_BASE": "https://mud.example", "DISCORD_CLIENT_ID": "i",
                "DISCORD_CLIENT_SECRET": "s", "AUTH_SERVICE_TOKEN": "s3cr3t-value"}

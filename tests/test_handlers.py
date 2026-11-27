@@ -897,21 +897,67 @@ class ConfigTest(unittest.TestCase):
 
 
 class BrandNameTest(unittest.TestCase):
-    def test_done_page_defaults_to_mudauth(self):
-        with unittest.mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("AUTH_BRAND_NAME", None)
-            page = server._done_page("ok")
-            self.assertIn("<title>mudauth</title>", page)
-            self.assertIn("<h1>mudauth</h1>", page)
+    _BRAND_VARS = ("AUTH_BRAND_NAME", "AUTH_BRAND_URL", "AUTH_BRAND_LOGO_URL", "AUTH_BRAND_ACCENT")
 
-    def test_done_page_uses_brand_env(self):
-        with unittest.mock.patch.dict(os.environ, {"AUTH_BRAND_NAME": "Realm of Bob"}):
-            page = server._done_page("ok")
-            self.assertIn("<h1>Realm of Bob</h1>", page)
+    def _page(self, env, ok=True, title="Signed in", message="ok"):
+        clean = {k: v for k, v in os.environ.items() if k not in self._BRAND_VARS}
+        with unittest.mock.patch.dict(os.environ, {**clean, **env}, clear=True):
+            return server._page(title, message, ok)
 
-    def test_done_page_escapes_brand(self):
-        with unittest.mock.patch.dict(os.environ, {"AUTH_BRAND_NAME": "<b>x</b>"}):
-            self.assertIn("&lt;b&gt;x&lt;/b&gt;", server._done_page("ok"))
+    def test_page_defaults_to_mudauth(self):
+        page = self._page({})
+        self.assertIn("<title>Signed in – mudauth</title>", page)
+        self.assertIn('<p class="brand">mudauth</p>', page)
+        self.assertIn(f"--accent:{server.DEFAULT_BRAND_ACCENT}", page)
+        # No logo: the brand's initial stands in, and nothing is fetched.
+        self.assertIn('<span class="mono" aria-hidden="true">M</span>', page)
+        self.assertNotIn("<img", page)
+        self.assertNotIn('rel="icon"', page)
+        self.assertNotIn('class="visit"', page)
+
+    def test_page_uses_brand_env(self):
+        page = self._page({
+            "AUTH_BRAND_NAME": "Realm of Bob",
+            "AUTH_BRAND_URL": "https://bob.example/",
+            "AUTH_BRAND_LOGO_URL": "https://bob.example/logo.png",
+            "AUTH_BRAND_ACCENT": "#fd9d32",
+        })
+        self.assertIn('<p class="brand">Realm of Bob</p>', page)
+        self.assertIn('<img src="https://bob.example/logo.png" alt=""', page)
+        self.assertIn('<link rel="icon" href="https://bob.example/logo.png">', page)
+        self.assertIn('href="https://bob.example/">Visit the Realm of Bob website</a>', page)
+        self.assertIn("--accent:#fd9d32", page)
+
+    def test_page_escapes_brand(self):
+        page = self._page({
+            "AUTH_BRAND_NAME": "<b>x</b>",
+            "AUTH_BRAND_URL": 'https://bob.example/?a="><script>',
+            "AUTH_BRAND_LOGO_URL": 'https://bob.example/l.png?"onerror=x',
+        })
+        self.assertIn("&lt;b&gt;x&lt;/b&gt;", page)
+        self.assertNotIn("<b>x</b>", page)
+        self.assertNotIn("<script>", page)
+        self.assertNotIn('"onerror', page)
+
+    def test_page_ignores_unusable_brand_settings(self):
+        env = {
+            "AUTH_BRAND_URL": "javascript:alert(1)",
+            "AUTH_BRAND_LOGO_URL": "http://bob.example/logo.png",
+            "AUTH_BRAND_ACCENT": "red;}body{display:none",
+        }
+        page = self._page(env)
+        self.assertNotIn("javascript:", page)
+        self.assertNotIn("<img", page)
+        self.assertNotIn("display:none", page)
+        self.assertIn(f"--accent:{server.DEFAULT_BRAND_ACCENT}", page)
+        clean = {k: v for k, v in os.environ.items() if k not in self._BRAND_VARS}
+        with unittest.mock.patch.dict(os.environ, {**clean, **env}, clear=True):
+            _, problems = server.brand()
+        self.assertEqual(len(problems), 3, problems)
+
+    def test_page_marks_success_and_failure(self):
+        self.assertIn('<main class="ok">', self._page({}, ok=True))
+        self.assertIn('<main class="bad">', self._page({}, ok=False))
 
 
 class LogRedactionTest(unittest.TestCase):

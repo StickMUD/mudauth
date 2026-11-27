@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Improve: the browser page players see after signing in is redesigned for
+  phones and desktops, follows the browser's light or dark setting, and
+  says plainly whether the sign-in worked and what to do next. Error and
+  cancelled sign-ins now get the same page instead of bare text.
+- New optional env vars `AUTH_BRAND_URL`, `AUTH_BRAND_LOGO_URL` and
+  `AUTH_BRAND_ACCENT` brand that page. An unusable value is ignored with a
+  startup log line, and `mudauth check` reports it.
+
 ## 0.1.1 — 2026-08-30
 
 - Fix: `--env-file` (on `serve` and `check`) no longer crashes with a raw

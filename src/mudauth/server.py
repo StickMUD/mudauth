@@ -97,6 +97,54 @@ def brand_name() -> str:
     return os.environ.get("AUTH_BRAND_NAME") or "mudauth"
 
 
+DEFAULT_BRAND_ACCENT = "#4f8fd8"
+_HEX_COLOR_RE = re.compile(r"#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})")
+
+
+def _brand_env_url(name: str, schemes: tuple[str, ...]) -> tuple[str, str | None]:
+    """Read a URL setting as ``(url, problem)``; ``url`` is "" when unset or
+    unusable, and ``problem`` says why an unusable one was ignored."""
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return "", None
+    try:
+        parts = urlparse(raw)
+    except ValueError:
+        parts = None
+    if (
+        parts is None
+        or parts.scheme not in schemes
+        or not parts.netloc
+        or any(c.isspace() or ord(c) < 32 for c in raw)
+    ):
+        wanted = " or ".join(f"{s}://" for s in schemes)
+        return "", f"{name} must be a {wanted} URL; ignoring {raw!r}"
+    return raw, None
+
+
+def brand() -> tuple[dict[str, str], list[str]]:
+    """The browser page's branding, and a problem line for each setting that
+    was set but ignored. A bad value never stops the service: the page falls
+    back to the default for that setting, and ``mudauth check`` and the
+    startup log name it."""
+    problems = []
+    url, problem = _brand_env_url("AUTH_BRAND_URL", ("https", "http"))
+    if problem:
+        problems.append(problem)
+    # https only: an http image on an https page is mixed content that
+    # browsers block or rewrite.
+    logo, problem = _brand_env_url("AUTH_BRAND_LOGO_URL", ("https",))
+    if problem:
+        problems.append(problem)
+    accent = (os.environ.get("AUTH_BRAND_ACCENT") or "").strip()
+    if not accent:
+        accent = DEFAULT_BRAND_ACCENT
+    elif not _HEX_COLOR_RE.fullmatch(accent):
+        problems.append(f"AUTH_BRAND_ACCENT must be a #rgb or #rrggbb color; ignoring {accent!r}")
+        accent = DEFAULT_BRAND_ACCENT
+    return {"name": brand_name(), "url": url, "logo": logo, "accent": accent}, problems
+
+
 # ── Diagnostics ───────────────────────────────────────────────────────────────
 
 
@@ -479,8 +527,8 @@ class AuthHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _html(self, code: int, body_html: str) -> None:
-        body = body_html.encode()
+    def _html(self, code: int, message_html: str, title: str = "Sign-in failed") -> None:
+        body = _page(title, message_html, ok=code == 200).encode()
         self.send_response(code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -591,7 +639,7 @@ class AuthHandler(BaseHTTPRequestHandler):
             # carry the steamid64 into the profile step.
             if q.get("openid.mode", [""])[0] == "cancel":
                 _log("[auth] steam callback: user cancelled at Steam")
-                self._html(400, _DECLINED_MESSAGE)
+                self._html(400, _DECLINED_MESSAGE, _DECLINED_TITLE)
                 return
             access = providers.verify_steam_assertion(q, cfg)
         else:
@@ -607,7 +655,7 @@ class AuthHandler(BaseHTTPRequestHandler):
                     f"{repr(error)[:100]}: {repr(desc)[:200]}"
                 )
                 if error == "access_denied":
-                    self._html(400, _DECLINED_MESSAGE)
+                    self._html(400, _DECLINED_MESSAGE, _DECLINED_TITLE)
                 else:
                     self._html(400, _AUTH_FAILED_MESSAGE)
                 return
@@ -623,7 +671,11 @@ class AuthHandler(BaseHTTPRequestHandler):
         user = providers.fetch_provider_user(provider, cfg, access)
         if not user:
             name = html.escape(providers.display_name(provider))
-            self._html(502, f"Could not fetch your {name} profile.")
+            self._html(
+                502,
+                f"Could not fetch your {name} profile. Go back to your MUD "
+                "client and start the sign-in again.",
+            )
             return
 
         nonce = pending.get("login_nonce")
@@ -638,7 +690,11 @@ class AuthHandler(BaseHTTPRequestHandler):
                     "created_at": time.time(),
                     "origin_ip": pending.get("origin_ip"),
                 }
-        self._html(200, _done_page("Authentication successful. Return to your MUD client."))
+        self._html(
+            200,
+            "Go back to your MUD client to continue. You can close this page.",
+            "You're signed in",
+        )
 
     # ── /auth/token-poll ──────────────────────────────────────────────────
 
@@ -746,27 +802,100 @@ class AuthHandler(BaseHTTPRequestHandler):
         self._json(200, {"cancelled": cancelled})
 
 
+_DECLINED_TITLE = "Sign-in cancelled"
+
 _DECLINED_MESSAGE = (
-    "You declined the sign-in request. You can close this tab and pick "
-    "another way to sign in from your MUD client."
+    "You declined the sign-in request. Go back to your MUD client to pick "
+    "another way to sign in. You can close this page."
 )
 
-_AUTH_FAILED_MESSAGE = "Authentication failed. Please try again."
+_AUTH_FAILED_MESSAGE = (
+    "The sign-in did not complete. Go back to your MUD client and start the "
+    "sign-in again."
+)
+
+# Light and dark follow the browser's setting. The page is one self-contained
+# response: no web fonts or scripts, and the only external fetch is the
+# operator's own AUTH_BRAND_LOGO_URL.
+_PAGE_CSS = (
+    ":root{color-scheme:light dark;--bg:#e8eaee;--surface:#fff;--ink:#1b1e24;"
+    "--muted:#555c68;--line:#d3d7de;--ok:#23804f;--bad:#b9382f;"
+    "--serif:\"Iowan Old Style\",\"Palatino Linotype\",Palatino,\"Book Antiqua\",Georgia,serif}"
+    "@media (prefers-color-scheme:dark){:root{--bg:#141519;--surface:#1f2126;"
+    "--ink:#eceef2;--muted:#a4aab5;--line:#353841;--ok:#4cc583;--bad:#f06d62}}"
+    "*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}"
+    "body{margin:0;min-height:100vh;min-height:100dvh;display:flex;"
+    "flex-direction:column;align-items:center;justify-content:center;"
+    "padding:max(1.5rem,env(safe-area-inset-top)) max(1rem,env(safe-area-inset-right)) "
+    "max(1.5rem,env(safe-area-inset-bottom)) max(1rem,env(safe-area-inset-left));"
+    "background:var(--bg);color:var(--ink);text-align:center;"
+    "font:1.0625rem/1.55 system-ui,-apple-system,\"Segoe UI\",Roboto,sans-serif}"
+    "main{width:100%;max-width:26rem;background:var(--surface);"
+    "border:1px solid var(--line);border-radius:20px;padding:2.5rem 1.75rem 2rem}"
+    ".seal{position:relative;width:6rem;height:6rem;margin:0 auto 1.25rem;"
+    "border-radius:50%;border:2px solid var(--accent);display:grid;place-items:center;"
+    "background:color-mix(in srgb,var(--accent) 16%,var(--surface))}"
+    ".seal img{width:4.75rem;height:4.75rem;object-fit:contain;border-radius:50%}"
+    ".mono{font:600 2.5rem/1 var(--serif)}"
+    ".badge{position:absolute;right:-.25rem;bottom:-.25rem;width:2.25rem;"
+    "height:2.25rem;border-radius:50%;display:grid;place-items:center;color:#fff;"
+    "background:var(--ok);border:3px solid var(--surface)}"
+    ".bad .badge{background:var(--bad)}"
+    ".badge svg{width:1.1rem;height:1.1rem}"
+    ".brand{margin:0 0 .25rem;color:var(--muted);font-size:.95rem}"
+    "h1{margin:0 0 .75rem;font:600 1.75rem/1.2 var(--serif);text-wrap:balance}"
+    ".msg{margin:0;text-wrap:pretty}"
+    ".visit{display:inline-block;margin-top:1.25rem;padding:.75rem .5rem;"
+    "color:var(--muted);font-size:.95rem}"
+    "a:focus-visible{outline:3px solid var(--accent);outline-offset:2px;border-radius:4px}"
+    "@media (max-width:30rem){body{justify-content:flex-start;"
+    "padding-top:max(10vh,env(safe-area-inset-top))}"
+    "main{border-radius:16px;padding:2rem 1.25rem 1.5rem}}"
+    "@media (prefers-reduced-motion:no-preference){"
+    ".badge{animation:stamp .45s cubic-bezier(.2,1.6,.4,1) .15s both}"
+    "@keyframes stamp{from{transform:scale(0)}to{transform:scale(1)}}}"
+    "@media (forced-colors:active){.seal,.badge{border-color:CanvasText}}"
+)
+
+_CHECK_SVG = (
+    "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\" fill=\"none\" stroke=\"currentColor\" "
+    "stroke-width=\"3.2\" stroke-linecap=\"round\" stroke-linejoin=\"round\">"
+    "<path d=\"M5 12.5l4.5 4.5L19 7.5\"/></svg>"
+)
+
+_CROSS_SVG = (
+    "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\" fill=\"none\" stroke=\"currentColor\" "
+    "stroke-width=\"3.2\" stroke-linecap=\"round\"><path d=\"M7 7l10 10M17 7L7 17\"/></svg>"
+)
 
 
-def _done_page(message: str) -> str:
-    brand = html.escape(brand_name())
+def _page(title: str, message_html: str, ok: bool) -> str:
+    """The browser page for every HTML response. ``message_html`` is trusted
+    markup: callers escape anything they interpolate into it."""
+    b, _ = brand()
+    name = html.escape(b["name"])
+    if b["logo"]:
+        logo = html.escape(b["logo"])
+        mark = f"<img src=\"{logo}\" alt=\"\" width=\"76\" height=\"76\">"
+        icon = f"<link rel=\"icon\" href=\"{logo}\">"
+    else:
+        mark = f"<span class=\"mono\" aria-hidden=\"true\">{html.escape(b['name'].strip()[:1].upper())}</span>"
+        icon = ""
+    visit = ""
+    if b["url"]:
+        visit = f"<a class=\"visit\" href=\"{html.escape(b['url'])}\">Visit the {name} website</a>"
     return (
         "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-        f"<title>{brand}</title><style>"
-        "body{font-family:system-ui,sans-serif;background:#10161d;color:#cfe3f2;"
-        "display:flex;align-items:center;justify-content:center;min-height:100vh;"
-        "margin:0;text-align:center}.card{max-width:420px;padding:2rem;border:1px "
-        "solid #2a3a4a;border-radius:12px;background:#16202a}h1{color:#5cc8ff;"
-        "font-size:1.4rem;margin:0 0 1rem}p{line-height:1.6}</style></head><body>"
-        f"<div class=\"card\"><h1>{brand}</h1><p>{message}</p>"
-        "<p>You may close this tab.</p></div></body></html>"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\">"
+        "<meta name=\"robots\" content=\"noindex\">"
+        "<meta name=\"theme-color\" content=\"#e8eaee\" media=\"(prefers-color-scheme: light)\">"
+        "<meta name=\"theme-color\" content=\"#141519\" media=\"(prefers-color-scheme: dark)\">"
+        f"<title>{html.escape(title)} – {name}</title>{icon}"
+        f"<style>:root{{--accent:{b['accent']}}}{_PAGE_CSS}</style></head>"
+        f"<body><main class=\"{'ok' if ok else 'bad'}\">"
+        f"<div class=\"seal\">{mark}<span class=\"badge\">{_CHECK_SVG if ok else _CROSS_SVG}</span></div>"
+        f"<p class=\"brand\">{name}</p><h1>{html.escape(title)}</h1>"
+        f"<p class=\"msg\">{message_html}</p>{visit}</main></body></html>"
     )
 
 
@@ -845,6 +974,8 @@ def make_server(host: str, port: int) -> ThreadingHTTPServer:
             "AUTH_SERVICE_TOKEN here and in the game's environment to close "
             "this gap; see docs/deploy.md for the migration order."
         )
+    for problem in brand()[1]:
+        _log(f"[auth] {problem}")
     _log(
         f"[auth] mudauth {__version__} on {host}:{bound_port} — "
         f"providers: {sorted(configs.keys()) or '(none configured)'} — "
