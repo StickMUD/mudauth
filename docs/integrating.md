@@ -70,8 +70,10 @@ to the account's home directory. If the driver starts with a different `HOME`, o
 with `PYTHONUSERBASE` set, pass the same value to both commands instead of `-H`
 (`sudo -u <driver-account> env HOME=/srv/mud <driver-python> ...`). Otherwise the
 install and the check both use a site the driver never searches.
-`<driver-python> -m site --user-site`, run with the driver's environment, prints
-the site the driver searches.
+`<driver-python> -m site`, run with the driver's environment, prints the
+`sys.path` and `USER_SITE` the driver uses. If it reports `ENABLE_USER_SITE: False`
+(for example because `PYTHONNOUSERSITE` is set), the driver ignores the user site
+entirely, so install into a directory on that `sys.path` instead.
 
 ## Anything with an HTTP client (Evennia, Node, Go, ...)
 
