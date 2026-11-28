@@ -228,15 +228,17 @@ instance. Do not `Include` it as a vhost of its own.
   pipx environment — those are separate installs and the efun is loaded by the driver,
   and an isolated pipx venv is invisible to it. A `pip install --user` is the usual
   choice; run it as the account the driver runs under, because the driver never
-  searches another account's user site. Add `--break-system-packages` on Debian 12+
-  (PEP 668) — it only affects the user site:
+  searches another account's user site:
 
   ```bash
-  sudo -u <driver-account> -H <driver-python> -m pip install --user --break-system-packages "mudauth[ldmud]"
+  sudo -u <driver-account> -H <driver-python> -m pip install --user "mudauth[ldmud]"
   sudo -u <driver-account> -H <driver-python> -c "import mudauth, mudauth.ldmud; print(mudauth.__version__)"
   ```
 
-  The second command checks that the driver's account can import it. See
+  Add `--break-system-packages` to the install on Debian 12+ (PEP 668) — it only
+  affects the user site. The second command checks that the driver's account can
+  import it. If the driver starts with a `HOME` other than the account's home, or
+  with `PYTHONUSERBASE` set, pass the same value instead of `-H`; see
   [integrating.md](integrating.md#ldmud).
 - Everything else: call the endpoints directly. See [integrating.md](integrating.md).
 

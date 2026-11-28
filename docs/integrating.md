@@ -58,12 +58,20 @@ under**, with the driver's interpreter. If you install as another account, the
 driver never searches that site, `auth_service_request` fails to import at driver
 start, and logins quietly fall back to whatever the game does without the efun:
 
-    sudo -u <driver-account> -H <driver-python> -m pip install --user --break-system-packages "mudauth[ldmud]"
+    sudo -u <driver-account> -H <driver-python> -m pip install --user "mudauth[ldmud]"
 
-`--break-system-packages` is needed on Debian 12+ (PEP 668) and only affects the
-user site; drop it elsewhere. Then check that the driver's account can import it:
+On Debian 12+ (PEP 668), add `--break-system-packages`, which only affects the
+user site. Then check that the driver's account can import it:
 
     sudo -u <driver-account> -H <driver-python> -c "import mudauth, mudauth.ldmud; print(mudauth.__version__)"
+
+The user site comes from the environment, not only the account: `-H` sets `HOME`
+to the account's home directory. If the driver starts with a different `HOME`, or
+with `PYTHONUSERBASE` set, pass the same value to both commands instead of `-H`
+(`sudo -u <driver-account> env HOME=/srv/mud <driver-python> ...`). Otherwise the
+install and the check both use a site the driver never searches.
+`<driver-python> -m site --user-site`, run with the driver's environment, prints
+the site the driver searches.
 
 ## Anything with an HTTP client (Evennia, Node, Go, ...)
 
