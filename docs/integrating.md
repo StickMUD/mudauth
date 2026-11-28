@@ -52,9 +52,28 @@ at start.
 The package must go into the interpreter the **driver's own embedded Python**
 imports from — an isolated installer such as pipx will not serve the efun even
 though it works fine for running the service itself (see [deploy.md](deploy.md)).
-A plain `pip install --user "mudauth[ldmud]"` targeting that interpreter is the
-usual choice; on Debian 12+ (PEP 668) add `--break-system-packages`, which only
-affects the user site.
+A `pip install --user` is the usual choice, but it writes to the user site of
+whichever account runs pip, so run it **as the account the driver process runs
+under**, with the driver's interpreter. If you install as another account, the
+driver never searches that site, `auth_service_request` fails to import at driver
+start, and logins quietly fall back to whatever the game does without the efun:
+
+    sudo -u <driver-account> -H <driver-python> -m pip install --user "mudauth[ldmud]"
+
+On Debian 12+ (PEP 668), add `--break-system-packages`, which only affects the
+user site. Then check that the driver's account can import it:
+
+    sudo -u <driver-account> -H <driver-python> -c "import mudauth, mudauth.ldmud; print(mudauth.__version__)"
+
+The user site comes from the environment, not only the account: `-H` sets `HOME`
+to the account's home directory. If the driver starts with a different `HOME`, or
+with `PYTHONUSERBASE` set, pass the same value to both commands instead of `-H`
+(`sudo -u <driver-account> env HOME=/srv/mud <driver-python> ...`). Otherwise the
+install and the check both use a site the driver never searches.
+`<driver-python> -m site`, run with the driver's environment, prints the
+`sys.path` and `USER_SITE` the driver uses. If it reports `ENABLE_USER_SITE: False`
+(for example because `PYTHONNOUSERSITE` is set), the driver ignores the user site
+entirely, so install into a directory on that `sys.path` instead.
 
 ## Anything with an HTTP client (Evennia, Node, Go, ...)
 
