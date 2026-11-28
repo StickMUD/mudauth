@@ -226,9 +226,18 @@ instance. Do not `Include` it as a vhost of its own.
   `auth_service_request` efun, then restart the driver so it loads. It must go into
   the Python interpreter your driver was built against, not the `mudauth` user's
   pipx environment — those are separate installs and the efun is loaded by the driver,
-  and an isolated pipx venv is invisible to it. A plain `pip install --user` targeting
-  that interpreter is the usual choice; add `--break-system-packages` on Debian 12+
-  (PEP 668) — it only affects the user site. See [integrating.md](integrating.md#ldmud).
+  and an isolated pipx venv is invisible to it. A `pip install --user` is the usual
+  choice; run it as the account the driver runs under, because the driver never
+  searches another account's user site. Add `--break-system-packages` on Debian 12+
+  (PEP 668) — it only affects the user site:
+
+  ```bash
+  sudo -u <driver-account> -H <driver-python> -m pip install --user --break-system-packages "mudauth[ldmud]"
+  sudo -u <driver-account> -H <driver-python> -c "import mudauth, mudauth.ldmud; print(mudauth.__version__)"
+  ```
+
+  The second command checks that the driver's account can import it. See
+  [integrating.md](integrating.md#ldmud).
 - Everything else: call the endpoints directly. See [integrating.md](integrating.md).
 
 The browser-facing base URL can be **derived automatically**: `GET /auth/providers`

@@ -52,9 +52,18 @@ at start.
 The package must go into the interpreter the **driver's own embedded Python**
 imports from — an isolated installer such as pipx will not serve the efun even
 though it works fine for running the service itself (see [deploy.md](deploy.md)).
-A plain `pip install --user "mudauth[ldmud]"` targeting that interpreter is the
-usual choice; on Debian 12+ (PEP 668) add `--break-system-packages`, which only
-affects the user site.
+A `pip install --user` is the usual choice, but it writes to the user site of
+whichever account runs pip, so run it **as the account the driver process runs
+under**, with the driver's interpreter. If you install as another account, the
+driver never searches that site, `auth_service_request` fails to import at driver
+start, and logins quietly fall back to whatever the game does without the efun:
+
+    sudo -u <driver-account> -H <driver-python> -m pip install --user --break-system-packages "mudauth[ldmud]"
+
+`--break-system-packages` is needed on Debian 12+ (PEP 668) and only affects the
+user site; drop it elsewhere. Then check that the driver's account can import it:
+
+    sudo -u <driver-account> -H <driver-python> -c "import mudauth, mudauth.ldmud; print(mudauth.__version__)"
 
 ## Anything with an HTTP client (Evennia, Node, Go, ...)
 
